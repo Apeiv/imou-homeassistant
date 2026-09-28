@@ -22,7 +22,8 @@ Mỗi camera thêm vào sinh ra:
 Tên hiển thị là **Assist Camera** (từ 0.2.3; trước là *Dahua/Imou Talk*). Mã tích hợp vẫn là
 `dahua_talk` — giữ nguyên để camera, thực thể và dòng go2rtc đã cài không phải làm lại.
 
-Và dịch vụ `dahua_talk.get_intercom_source` — trả dòng cấu hình go2rtc cho **bộ đàm**.
+Và dịch vụ `dahua_talk.get_intercom_source` — trả dòng cấu hình go2rtc cho **bộ đàm** (từ 0.5.0:
+dòng `rtsp://…:8557`, tiếng điện thoại đi **16 kHz**; bản cũ là dòng `exec:` 8 kHz, vẫn chạy).
 
 `entity_id` luôn sinh từ tên **tiếng Anh** (vd camera tên *Cam cửa* →
 `media_player.cam_cua_speaker`), kể cả khi HA để tiếng Việt; tên **hiển thị** trên
@@ -233,28 +234,46 @@ loa camera nguyên gốc (không qua TTS) — như app Imou, nhưng ngay trong H
 
 ```
 Điện thoại (thẻ WebRTC Camera, mic)
-        │  WebRTC (cổng 8555)
+        │  WebRTC (cổng 8555) — tiếng Opus 48 kHz của trình duyệt
         ▼
      go2rtc ──── nghe: tiếng camera (opus) ───────────────► điện thoại
-        │  nói: kênh ngược → lệnh exec (ffmpeg)
-        ▼  POST A-law 8 kHz, khoá riêng của camera
-Home Assistant — /api/dahua_talk/intercom/<camera>
-        │  cổng 37777 (giao thức nói Dahua)
+        │  nói: kênh ngược RTSP (kiểu ONVIF) — chuyển nguyên gói Opus, không đổi mã
+        ▼  rtsp://<HA>:8557/<camera>/<khoá>
+Home Assistant — tích hợp tự mở cổng 8557, giải mã Opus (PyAV có sẵn trong HA)
+        │  Imou: cổng 8086, AAC 16 kHz (37777 PCM 8 kHz dự phòng)
+        │  EZVIZ/Hikvision: HCNetSDK cổng 8000, AAC 16 kHz
         ▼
    Loa camera
 ```
+
+**Vì sao là RTSP chứ không phải `exec:` như bản ≤ 0.4.x.** WebRTC của go2rtc (1.9.14)
+chỉ nhận từ trình duyệt Opus 48 kHz, PCMU hoặc PCMA 8 kHz; lệnh `exec:` nhận tiếng
+dạng dòng byte liền, không giữ ranh giới gói, nên chỉ G.711 **8 kHz** dùng được — tiếng
+bị cắt ở 4 kHz, mất phụ âm s/x/ch. Nguồn RTSP có rãnh kênh ngược khai `opus/48000` thì
+go2rtc chọn Opus với trình duyệt và chuyển **từng gói** sang (đo thật: 379 gói Opus/8 giây).
+Tích hợp giải mã ra đúng tần số loa (16 kHz với Imou 8086 và EZVIZ), nên tiếng nói **rõ
+như TTS**. Không cần add-on: máy chủ RTSP nhỏ chạy ngay trong tích hợp.
 
 - **Chỉ mở loa khi có tiếng người** (to hơn -45 dBFS), **đóng sau 1,5 giây im**, giữ
   0,3 giây ngay trước tiếng để không mất âm đầu câu. Lý do: camera **tự tắt mic của
   nó suốt lúc loa đang mở**, mà trình duyệt gửi tiếng liên tục — mở loa suốt thì
   không bao giờ nghe được người bên camera trả lời. Dùng như bộ đàm: nói xong ngừng,
   rồi nghe.
-- **Trực tiếp**, không thu hết rồi mới phát: mỗi khúc tiếng ra loa sau ~0,1–0,3 giây;
-  câu đầu mỗi lượt chờ thêm lúc mở kênh nói với camera (0,05–0,9 giây).
+- **Không tích trễ** (từ 0.5.0): lúc chờ mở kênh, tiếng dồn lại; tích hợp **bỏ các
+  khoảng lặng** (trước câu, giữa các từ) cho tới khi đuổi kịp thời gian thực — tiếng
+  nói không bị bỏ. Đo trong HA: tiếng ra loa sau ~0,1–0,4 giây, cộng bộ đệm của camera.
+- **EZVIZ / Hikvision (HCNetSDK) — nghỉ giữa câu thì câu sau trễ ~1,2 giây.** Đo trên
+  EZVIZ H6C: sau khi đóng kênh nói, camera cần **~1,24 giây** mới cho mở lại (mở bằng
+  phiên đăng nhập khác cũng vậy — do camera, không do HA). Nghỉ **1,5–3,5 giây** giữa
+  hai câu là rơi đúng lúc kênh đang đóng / đang nhả: câu sau chờ ~1,2 giây rồi mới ra
+  loa (phần trễ này rồi cũng được thu lại qua các khoảng lặng). Nói liền một mạch hoặc
+  nghỉ hẳn hơn 3,5 giây thì không bị. Không giữ kênh mở suốt được: đo trên H6C, **mic
+  camera câm suốt lúc kênh mở, kể cả khi không gửi tiếng** — giữ mở là không bao giờ
+  nghe được bên kia. Camera Imou mở lại kênh chỉ ~0,03 giây nên không gặp.
 
-**Cần:** go2rtc **≥ 1.9.10** (kênh ngược qua `exec`), thẻ
-[WebRTC Camera](https://github.com/AlexxIT/WebRTC), HA mở bằng **https** (trình
-duyệt chỉ cho dùng mic trên https).
+**Cần:** go2rtc **≥ 1.9.10**, thẻ [WebRTC Camera](https://github.com/AlexxIT/WebRTC), HA mở
+bằng **https** (trình duyệt chỉ cho dùng mic trên https). Máy chạy go2rtc phải **gọi tới
+được cổng 8557 của HA** trong mạng nhà — **không** mở cổng này ra internet.
 
 ### Bước 1 — lấy dòng go2rtc
 
@@ -270,19 +289,31 @@ data:
 Bấm **Thực hiện hành động**, chép dòng `source` trả về. Nó có dạng:
 
 ```
-exec:ffmpeg -hide_banner -loglevel error -probesize 32 -analyzeduration 0 -fflags nobuffer -f alaw -ar 8000 -ac 1 -i - -c:a copy -f alaw -flush_packets 1 -method POST http://127.0.0.1:8123/api/dahua_talk/intercom/<mã camera>?k=<khoá>#backchannel=1#audio=alaw/8000
+rtsp://127.0.0.1:8557/<mã camera>/<khoá>#backchannel=1
 ```
 
 Mỗi camera một dòng riêng (khoá khác nhau). Dòng không đổi sau khi khởi động lại HA.
 
-> Đừng tự viết lại dòng này. Ba cờ `-probesize 32 -analyzeduration 0 -fflags
-> nobuffer` là bắt buộc: thiếu chúng, ffmpeg **gom tiếng để dò định dạng** rồi mới
-> nhả — đo thật: nói 2,5 giây mà 0 byte tới loa, tức "thu hết rồi mới phát".
+- `#backchannel=1` phải giữ: go2rtc **tắt kênh ngược** của nguồn RTSP hễ URL có bất kỳ
+  tuỳ chọn `#…` nào khác, trừ khi ghi rõ `#backchannel=1`.
+- Kết quả còn trường `exec_source` — dòng `exec:` **8 kHz** kiểu cũ. Chỉ dùng khi máy
+  go2rtc không gọi tới được cổng 8557 của HA.
+- HA không giải mã được Opus (thiếu PyAV — bản HA chính thức luôn có) hoặc cổng 8557 đã
+  bị chương trình khác chiếm: `source` trả luôn dòng `exec:`, log HA có cảnh báo
+  `intercom RTSP: …`.
+- Đang dùng dòng `exec:` cũ: **thay** nó bằng dòng `rtsp://` mới (một luồng chỉ một dòng
+  bộ đàm). Khoá giữ nguyên nên dòng cũ vẫn chạy nếu chưa đổi.
+
+> Dòng `exec:` (nếu dùng) đừng tự viết lại. Ba cờ `-probesize 32 -analyzeduration 0
+> -fflags nobuffer` là bắt buộc: thiếu chúng, ffmpeg **gom tiếng để dò định dạng** rồi
+> mới nhả — đo thật: nói 2,5 giây mà 0 byte tới loa, tức "thu hết rồi mới phát".
 
 ### Chọn `ha_url` theo cách bạn cài
 
 `ha_url` là **địa chỉ HA mà máy chạy go2rtc gọi tới được**. Tiếng đi từ go2rtc sang
-HA, nên chỉ cần hai bên thấy nhau trong mạng nhà.
+HA, nên chỉ cần hai bên thấy nhau trong mạng nhà. Dòng `rtsp://` chỉ lấy **phần máy**
+của `ha_url` (vd `http://192.168.1.10:8123` → `rtsp://192.168.1.10:8557/…`); cổng 8557
+phải mở trong mạng nhà (tường lửa trên máy HA, nếu có).
 
 | Cách cài | `ha_url` | Vì sao |
 |---|---|---|
@@ -298,9 +329,16 @@ HA, nên chỉ cần hai bên thấy nhau trong mạng nhà.
 `ha_url`: tiếng đi vòng ra ngoài rồi mới về, chậm và phụ thuộc mạng.
 
 Kiểm từ máy chạy go2rtc:
-`curl -s -o /dev/null -w '%{http_code}\n' -X POST "<URL trong dòng exec>"` phải ra
-`200` (không có tiếng thì loa không mở). `401` là sai khoá / sai camera; không kết
-nối được là sai `ha_url`.
+
+- Dòng `rtsp://` (bỏ phần `#backchannel=1`):
+  ```bash
+  printf 'DESCRIBE rtsp://IP_HA:8557/<mã>/<khoá> RTSP/1.0\r\nCSeq: 1\r\n\r\n' | nc IP_HA 8557
+  ```
+  phải ra `RTSP/1.0 200 OK` kèm dòng `a=rtpmap:96 opus/48000/2`. `404 Not Found` là sai
+  khoá / sai camera; không kết nối được là sai địa chỉ hoặc tường lửa chặn 8557.
+  (Đừng kiểm bằng `ffprobe`: rãnh này chỉ **nhận** tiếng, ffprobe ngồi chờ mãi.)
+- Dòng `exec:`: `curl -s -o /dev/null -w '%{http_code}\n' -X POST "<URL trong dòng exec>"`
+  phải ra `200`. `401` là sai khoá / sai camera.
 
 ### Bước 2 — cấu hình go2rtc
 
@@ -312,7 +350,7 @@ streams:
   cam_cua:
     - rtsp://admin:MATKHAU@192.168.1.64:554/cam/realmonitor?channel=1&subtype=0
     - ffmpeg:cam_cua#audio=opus          # tiếng camera cho WebRTC (AAC không đi qua WebRTC được)
-    - "exec:ffmpeg … #backchannel=1#audio=alaw/8000"   # dòng từ bước 1
+    - "rtsp://127.0.0.1:8557/<mã camera>/<khoá>#backchannel=1"   # dòng từ bước 1
   cam_cua_sub:
     - rtsp://admin:MATKHAU@192.168.1.64:554/cam/realmonitor?channel=1&subtype=1
 
@@ -324,8 +362,9 @@ webrtc:
 
 Khởi động lại go2rtc (add-on: Cài đặt → Add-on → go2rtc → Khởi động lại).
 
-- Dòng `exec` phải thêm vào **tệp cấu hình**. go2rtc **chặn** nguồn `exec` (có dấu
-  cách) thêm qua API / giao diện web của nó, vì lý do an toàn.
+- Dòng `rtsp://` thêm được cả qua giao diện web của go2rtc. Dòng `exec:` thì phải thêm
+  vào **tệp cấu hình** — go2rtc **chặn** nguồn `exec` thêm qua API / giao diện web, vì
+  lý do an toàn ("source from insecure producer").
 - Thêm vào **đúng luồng** mà thẻ WebRTC xem (thường là luồng chính). Luồng phụ cho
   AI / Frigate không cần.
 
@@ -356,7 +395,7 @@ style: |
 - `style` ẩn nút lưu ảnh và cửa sổ nổi, thu nhỏ biểu tượng — chỉ còn phóng to/thu nhỏ,
   nút đổi chế độ và nút loa. Ẩn cả nút loa thì thêm `, .volume` vào dòng đầu — nhưng
   thẻ thường mở ở chế độ **tắt tiếng**, ẩn nút loa là **không nghe được** bên camera.
-- Dashboard nhiều camera: **chỉ thẻ của camera có dòng `exec` bộ đàm** mới cần mục 🎙️.
+- Dashboard nhiều camera: **chỉ thẻ của camera có dòng bộ đàm** mới cần mục 🎙️.
   Thẻ nào có `microphone` là mic điện thoại mở ngay khi thẻ hiện — nhiều thẻ như vậy
   trên một trang là mic mở suốt dù chỉ một camera phát được.
 
@@ -588,13 +627,46 @@ go2rtc tự tắt bộ lọc này — không cần sửa.
 
 ### Không muốn mở cổng
 
-Dùng VPN **về nhà** (WireGuard trên router, add-on Tailscale…): bật VPN trên điện
-thoại là như đang ở trong mạng nhà, WebRTC nối thẳng IP LAN, không mở cổng nào. Đổi
-lại phải bật VPN mỗi lần dùng.
+**Trong nhà không bao giờ cần mở cổng.** Cổng 8555 chỉ để **nói** từ ngoài nhà (4G).
+Không mở thì ở ngoài vẫn xem hình, nghe tiếng (sau ~30 giây thẻ tụt về MSE) nhưng
+**không có mic**. Các cách có mic mà không mở cổng, dễ trước khó sau:
 
-**Cloudflare Tunnel / proxy Cloudflare (đám mây cam) / Nabu Casa chỉ chở trang web
-của HA**, không chở WebRTC — xem từ xa qua chúng vẫn có hình (MSE) nhưng **không có
-mic**.
+1. **Thử không làm gì.** go2rtc mặc định hỏi STUN (`stun.l.google.com`) và "đục lỗ" NAT
+   bằng UDP — theo tài liệu go2rtc, cách này hỏng với khoảng 20% mạng (NAT *đối xứng*,
+   hay gặp ở mạng di động). Muốn thử: go2rtc phải mở UDP (`listen: ":8555"`, không
+   `/tcp`), tắt 4G trên điện thoại vài giây rồi mở thẻ bằng 4G; có mic sau vài giây là được.
+2. **ngrok — go2rtc có sẵn.** Đăng ký ngrok (gói miễn phí), thêm vào `go2rtc.yaml`:
+   ```yaml
+   ngrok:
+     command: ngrok tcp 8555 --authtoken <token ngrok của bạn>
+   ```
+   (tải chương trình `ngrok` về máy chạy go2rtc). go2rtc tự lấy địa chỉ tcp ngrok cấp
+   và thêm vào WebRTC (log: `[ngrok] add external candidate for WebRTC`) — không cần
+   khai `candidates`. Tiếng và hình đi vòng qua máy chủ ngrok nên trễ hơn đi thẳng; địa
+   chỉ tcp đổi mỗi lần khởi động — không sao, go2rtc tự cập nhật.
+3. **Máy chủ chuyển tiếp TURN.** Khai trong `webrtc: ice_servers:` (kèm STUN mặc định):
+   ```yaml
+   webrtc:
+     ice_servers:
+       - urls: [ stun:stun.l.google.com:19302 ]
+       - urls: [ turn:IP_MAY_CHU:3478 ]
+         username: ten
+         credential: mat_khau
+   ```
+   Máy chủ TURN tự dựng (coturn) trên một VPS có IP công khai; hoặc Cloudflare Realtime
+   TURN (miễn phí 1.000 GB/tháng, nhưng mật khẩu **sống ngắn**, phải có lệnh làm mới
+   định kỳ — go2rtc đọc mật khẩu cố định từ tệp).
+4. **VPN về nhà** (WireGuard trên router, add-on Tailscale…): bật VPN trên điện thoại là
+   như ở trong nhà, WebRTC nối thẳng IP LAN. Đổi lại phải bật VPN mỗi lần dùng. Máy HA
+   có card Tailscale thì xem [go2rtc bỏ qua IP LAN](#go2rtc-bỏ-qua-ip-lan-của-chính-nó).
+
+**Cloudflare Tunnel / proxy Cloudflare (đám mây cam) chỉ chở trang web của HA**, không
+chở WebRTC. **Nabu Casa** có TURN riêng nhưng cho WebRTC của **chính HA** (thẻ camera
+mặc định), không cho go2rtc chạy riêng / thẻ WebRTC Camera.
+
+Nguồn: [go2rtc — WebRTC](https://github.com/AlexxIT/go2rtc/blob/master/internal/webrtc/README.md),
+[go2rtc — ngrok](https://github.com/AlexxIT/go2rtc/blob/master/internal/ngrok/README.md),
+[Cloudflare Realtime TURN](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
 
 ---
 
@@ -618,8 +690,10 @@ mạng nhà ra internet qua VPN** bằng mangle; máy HA có thêm card mạng *
 2. **Thử loa:** `tts.speak` tới `media_player.<camera>_speaker`.
 3. **Dòng bộ đàm:** `dahua_talk.get_intercom_source` với `ha_url` **để trống**
    (go2rtc chạy ngay trong HA → `127.0.0.1` là HA).
-4. **`/config/go2rtc.yaml`** — dán dòng `exec` vào luồng camera (một luồng chỉ **một**
-   dòng `exec` bộ đàm), và khai `webrtc:` **đủ cả `filters: ips`** (lý do ở lỗi 4):
+4. **`/config/go2rtc.yaml`** — dán dòng bộ đàm vào luồng camera (một luồng chỉ **một**
+   dòng bộ đàm; ví dụ dưới là dòng `exec` của bản ≤ 0.4.x — từ 0.5.0 là dòng
+   `rtsp://127.0.0.1:8557/…#backchannel=1`), và khai `webrtc:` **đủ cả `filters: ips`**
+   (lý do ở lỗi 4):
 
    ```yaml
    streams:
@@ -638,7 +712,7 @@ mạng nhà ra internet qua VPN** bằng mangle; máy HA có thêm card mạng *
    ```
    Khởi động lại HA để go2rtc đọc lại tệp.
 5. **Thẻ:** cấu hình 🔇/🎙️ ở [Bước 3](#bước-3--thẻ-webrtc-camera). Chỉ thẻ của camera
-   có dòng `exec` mới có mục 🎙️.
+   có dòng bộ đàm mới có mục 🎙️.
 6. **MikroTik:** chuyển cổng 8555/TCP về máy HA và cho riêng máy HA **đi thẳng mạng
    nhà** (lỗi 2 và 3 bên dưới).
 
@@ -653,7 +727,7 @@ mạng nhà ra internet qua VPN** bằng mangle; máy HA có thêm card mạng *
 | 5 | Lệnh kiểm MikroTik `print stats where dst-port=8555` **không in gì** dù luật có | Lọc theo cổng không khớp ở lệnh này | Lọc theo tên: `/ip firewall nat export where comment~"WebRTC"`. |
 | 6 | Kiểm cổng từ máy trong nhà báo **không nối được** dù điện thoại 4G nối được | Gói từ trong nhà đi vòng qua VPN / không quay đầu (hairpin) về được | Kiểm **từ ngoài**: check-host.net, hoặc đếm gói NAT khi mở thẻ bằng 4G. |
 | 7 | Máy tính trong nhà mở HA bằng `http://IP:8123`: thẻ camera nối đi nối lại, console báo `getUserMedia` | Trình duyệt cấm mic trên http | Mở bằng tên miền https, hoặc để thẻ ở 🔇. |
-| 8 | Một trang 4 camera, **mic điện thoại mở suốt** (chấm xanh) | Thẻ nào có `microphone` là xin mic ngay khi hiện | Mục 🔇/🎙️; chỉ camera có `exec` mới có 🎙️. |
+| 8 | Một trang 4 camera, **mic điện thoại mở suốt** (chấm xanh) | Thẻ nào có `microphone` là xin mic ngay khi hiện | Mục 🔇/🎙️; chỉ camera có dòng bộ đàm mới có 🎙️. |
 | 9 | Luồng khác có dòng `exec:ffmpeg -f dshow -i "audio=Microphone …"` | Chép từ ví dụ **Windows** của tài liệu go2rtc — không chạy trên Linux, cũng không phải bộ đàm | Xoá dòng đó. |
 | 10 | Dán cấu hình go2rtc / `api/streams` ra ngoài để hỏi | Lộ **mật khẩu camera** (nằm trong URL `rtsp://`) và khoá bộ đàm | Che `admin:…@` và `k=…` trước khi dán; lỡ lộ thì đổi mật khẩu camera, lấy lại dòng bộ đàm. |
 
@@ -688,15 +762,15 @@ cameras:
           roles: [record]
 ```
 
-(`USER:PASS` là `rtsp: username/password` đặt trong `go2rtc.yaml`.) Dòng `exec` bộ
-đàm nằm trong `go2rtc.yaml` của HA như bước 2; `ha_url` theo bảng ở trên. Thẻ WebRTC
+(`USER:PASS` là `rtsp: username/password` đặt trong `go2rtc.yaml`.) Dòng bộ đàm nằm
+trong `go2rtc.yaml` của HA như bước 2; `ha_url` theo bảng ở trên. Thẻ WebRTC
 xem go2rtc của HA. Không khai camera trong mục `go2rtc:` của Frigate nữa.
 
 **Cách B — go2rtc của Frigate là nguồn**
 
-- Thêm dòng `exec` vào mục `go2rtc: streams:` trong cấu hình Frigate, với `ha_url` =
+- Thêm dòng bộ đàm vào mục `go2rtc: streams:` trong cấu hình Frigate, với `ha_url` =
   **IP LAN của HA** (Frigate chạy trong container / máy khác, nên `127.0.0.1` không
-  phải HA).
+  phải HA); máy Frigate phải gọi tới được cổng 8557 của HA.
 - Phiên bản go2rtc đi kèm Frigate phải **≥ 1.9.10**: mở `http://IP_FRIGATE:1984/api`
   (hoặc cổng go2rtc mà Frigate mở ra), xem trường `version`.
 - Tích hợp WebRTC Camera phải trỏ tới go2rtc của Frigate (`http://IP_FRIGATE:1984`),
@@ -710,8 +784,8 @@ xem go2rtc của HA. Không khai camera trong mục `go2rtc:` của Frigate nữ
 
 ## Bảo mật
 
-- **Khoá bộ đàm:** mỗi camera một khoá ngẫu nhiên (trong dòng `exec`). Ai có dòng đó
-  **chỉ phát được tiếng ra loa của camera ấy** — không xem, không điều khiển gì khác.
+- **Khoá bộ đàm:** mỗi camera một khoá ngẫu nhiên (trong dòng `rtsp://` / `exec:`). Ai có
+  dòng đó **chỉ phát được tiếng ra loa của camera ấy** — không xem, không điều khiển gì khác.
   Đừng dán dòng này ra ngoài `go2rtc.yaml`. Lộ khoá thì xoá camera khỏi tích hợp rồi
   thêm lại (sinh khoá mới), lấy lại dòng và thay trong `go2rtc.yaml`.
 - **API go2rtc (1984)** mặc định không có mật khẩu và trả URL camera **kèm mật khẩu**
@@ -725,7 +799,9 @@ xem go2rtc của HA. Không khai camera trong mục `go2rtc:` của Frigate nữ
   rồi sửa URL go2rtc trong tích hợp WebRTC Camera (và mọi thứ khác đang gọi API,
   kể cả *URL tiếng mic* của tích hợp này: `http://ten_rieng:mat_khau_rieng@IP:1984/…`)
   cho khớp.
-- Chỉ mở **8555** ra internet — [Mở cổng trên router](#mở-cổng-trên-router).
+- Chỉ mở **8555** ra internet — [Mở cổng trên router](#mở-cổng-trên-router). Cổng
+  **8557** (bộ đàm RTSP của tích hợp) chỉ cho go2rtc trong mạng nhà, **không** chuyển ra
+  internet.
 - Camera ngoài trời: không bật nghe cho Assist — [xem trên](#vệ-tinh-assist-từ-gọi-tăng-mic).
 
 ---
@@ -742,7 +818,10 @@ xem go2rtc của HA. Không khai camera trong mục `go2rtc:` của Frigate nữ
 | Cổng 8555 mở từ ngoài, router đếm gói tăng, 4G vẫn không nối | Mạng nhà `172.16–31.x.x` + máy có card Tailscale/VPN → go2rtc bỏ qua IP LAN | `webrtc: filters: ips: [IP_LAN]` — [xem](#go2rtc-bỏ-qua-ip-lan-của-chính-nó). |
 | Loa đọc câu vẫn sai dù đã cập nhật TTS | HA lưu đệm tiếng theo câu chữ + giọng, trả lại tệp cũ | Chạy `action: tts.clear_cache` rồi phát lại. |
 | go2rtc báo `exec: Stdin already set` | Mở lại thẻ khi phiên cũ chưa đóng, hoặc hai thẻ mở mic cùng một luồng | Đóng thẻ ~10 giây rồi mở lại; mỗi luồng chỉ một thẻ có mic. |
-| Thêm dòng `exec` qua giao diện go2rtc bị từ chối | go2rtc chặn nguồn `exec` qua API | Sửa thẳng `go2rtc.yaml`. |
+| Thêm dòng `exec` qua giao diện go2rtc bị từ chối | go2rtc chặn nguồn `exec` qua API | Sửa thẳng `go2rtc.yaml` — hoặc dùng dòng `rtsp://` (0.5.0), thêm qua giao diện được. |
+| `get_intercom_source` trả dòng `exec:` chứ không phải `rtsp://` | HA thiếu bộ giải mã Opus (PyAV), hoặc cổng 8557 bị chương trình khác chiếm — log HA có `intercom RTSP: …` | Giải phóng cổng 8557 rồi khởi động lại HA; không được thì dùng dòng `exec:` (8 kHz). |
+| Nói không ra loa sau khi đổi sang dòng `rtsp://` | go2rtc không gọi tới được `IP_HA:8557` (sai `ha_url`, tường lửa), hoặc thiếu `#backchannel=1` | Kiểm bằng `nc` ở [mục `ha_url`](#chọn-ha_url-theo-cách-bạn-cài); dùng nguyên dòng dịch vụ trả về. |
+| EZVIZ / Hikvision: nghỉ giữa câu thì câu sau ra loa trễ ~1,2 giây | Camera cần ~1,24 giây mới mở lại kênh nói vừa đóng | Bình thường với dòng camera này — nói liền, hoặc nghỉ hẳn hơn 3,5 giây. [Chi tiết](#cách-hoạt-động). |
 | Tiếng ra loa trễ cả câu | Dòng `exec` thiếu `-probesize 32 -analyzeduration 0 -fflags nobuffer` | Dùng đúng dòng dịch vụ trả về. |
 | Nói nhỏ thì loa không phát | Dưới ngưỡng -45 dBFS | Nói gần điện thoại hơn. |
 | Đang nói thì không nghe bên kia | Camera tắt mic lúc loa mở | Bình thường — nói xong ngừng ~1,5 giây là nghe được. |
@@ -764,7 +843,9 @@ xem go2rtc của HA. Không khai camera trong mục `go2rtc:` của Frigate nữ
 - Chỉ kênh nói 0 (camera một mắt). Số kênh ngoài dải làm một số firmware khởi động lại.
 - Âm lượng loa chỉ chỉnh ở camera (SmartPSS / app Imou).
 - Bộ đàm là **luân phiên** (như bộ đàm), không song công như gọi điện — do camera
-  tắt mic lúc loa mở.
+  tắt mic lúc loa mở (đo cả Imou lẫn EZVIZ H6C).
+- EZVIZ / Hikvision qua HCNetSDK: mở lại kênh nói ngay sau khi đóng phải chờ ~1,2 giây
+  (do camera).
 
 ## Phát triển và test
 

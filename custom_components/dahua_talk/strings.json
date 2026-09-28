@@ -48,7 +48,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure camera",
-        "description": "The intercom key is kept — the exec: line already in go2rtc.yaml keeps working. Leave the password empty to keep the current one.",
+        "description": "The intercom key is kept — the line already in go2rtc.yaml (rtsp:// or exec:) keeps working. Leave the password empty to keep the current one.",
         "data": {
           "host": "Camera IP",
           "port": "Talk port",
@@ -110,7 +110,7 @@
   "services": {
     "get_intercom_source": {
       "name": "go2rtc source for intercom",
-      "description": "Returns the exec: line to append to the camera stream in go2rtc.yaml so the WebRTC Camera card can talk through the camera speaker.",
+      "description": "Returns the line to append to the camera stream in go2rtc.yaml so the WebRTC Camera card can talk through the camera speaker: an rtsp:// source on port 8557 (phone audio in Opus, played at 16 kHz), or the exec: line (8 kHz) when this Home Assistant cannot decode Opus. exec_source is the 8 kHz line, for a go2rtc that cannot reach port 8557.",
       "fields": {
         "entity_id": {
           "name": "Camera speaker",

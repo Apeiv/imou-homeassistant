@@ -8,7 +8,8 @@ Mỗi camera là một mục cấu hình, sinh ra:
 * ``media_player`` — ``tts.speak`` / ``media_player.play_media`` ra loa camera.
 * ô chọn pipeline, ô chọn độ nhạy "nói xong", công tắc tắt mic, mức tăng mic.
 * bộ đàm: mic điện thoại qua thẻ WebRTC Camera (go2rtc) → loa camera; dịch vụ
-  ``dahua_talk.get_intercom_source`` trả dòng dán vào go2rtc.yaml.
+  ``dahua_talk.get_intercom_source`` trả dòng dán vào go2rtc.yaml — nguồn RTSP cổng 8557
+  (Opus → 16 kHz, ``rtsp_intercom``), hoặc dòng ``exec:`` 8 kHz khi HA thiếu bộ giải mã Opus.
 
 Loa đi qua cổng 37777 của camera (giao thức nói của Dahua), hoặc qua kênh tiếng ngược
 RTSP/ONVIF với camera EZVIZ/Hikvision/ONVIF (``rtsp_talk``). Mic đọc từ một URL
@@ -18,14 +19,17 @@ RTSP/ONVIF với camera EZVIZ/Hikvision/ONVIF (``rtsp_talk``). Mic đọc từ m
 from __future__ import annotations
 
 import secrets
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 
 import voluptuous as vol
 
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, Platform
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse, callback
+from homeassistant.const import (CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME,
+                                 EVENT_HOMEASSISTANT_STOP, Platform)
+from homeassistant.core import (Event, HomeAssistant, ServiceCall, ServiceResponse,
+                                SupportsResponse, callback)
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
@@ -36,6 +40,7 @@ from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAU
 from .intercom import CONF_INTERCOM_KEY, IntercomView, go2rtc_source
 from .hik_talk import MoPhienHik
 from .http_talk import MoPhienImou
+from .rtsp_intercom import MayChuBoDam, go2rtc_rtsp_source
 from .rtsp_talk import RtspTalkSession
 from .speaker import Speaker
 
@@ -89,6 +94,11 @@ type DahuaTalkConfigEntry = ConfigEntry[DahuaTalkData]
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(IntercomView())
+    may_chu = MayChuBoDam(hass)
+    if await may_chu.async_start():
+        async def _dung(_e: Event) -> None:
+            await may_chu.async_stop()
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _dung)
 
     async def _nguon_bo_dam(call: ServiceCall) -> ServiceResponse:
         entity_id = call.data["entity_id"]
@@ -96,8 +106,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         entry = hass.config_entries.async_get_entry(rec.config_entry_id) if rec else None
         if entry is None or entry.domain != DOMAIN:
             raise ServiceValidationError(f"{entity_id} is not an Assist Camera entity")
-        return {"source": go2rtc_source(hass, entry.entry_id, entry.data[CONF_INTERCOM_KEY],
-                                        call.data.get("ha_url", ""))}
+        key, ha_url = entry.data[CONF_INTERCOM_KEY], call.data.get("ha_url", "")
+        exec_16 = go2rtc_source(hass, entry.entry_id, key, ha_url)
+        if not may_chu.dang_chay:
+            return {"source": exec_16}
+        host = urlsplit(ha_url).hostname if ha_url else "127.0.0.1"
+        # ``exec_source``: đường 8 kHz cũ, cho go2rtc không với tới cổng 8557 của HA.
+        return {"source": go2rtc_rtsp_source(entry.entry_id, key, host, may_chu.port),
+                "exec_source": exec_16}
 
     hass.services.async_register(
         DOMAIN, "get_intercom_source", _nguon_bo_dam,

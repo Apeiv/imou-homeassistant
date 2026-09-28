@@ -139,10 +139,20 @@ streams:
   cam_ezviz:
     - rtsp://admin:MA_XAC_MINH@192.168.1.64:554/Streaming/Channels/101#backchannel=0
     - ffmpeg:cam_ezviz#audio=opus
-    - "exec:ffmpeg … #backchannel=1#audio=alaw/8000"   # dòng từ dahua_talk.get_intercom_source
+    - "rtsp://127.0.0.1:8557/<mã>/<khoá>#backchannel=1"   # dòng từ dahua_talk.get_intercom_source
 ```
 
-Lấy dòng `exec` và chọn `ha_url`: [README chính → Bộ đàm](README.md#bộ-đàm) (y hệt Imou).
+Lấy dòng bộ đàm và chọn `ha_url`: [README chính → Bộ đàm](README.md#bộ-đàm) (y hệt Imou). Từ
+0.5.0 dòng này là `rtsp://…:8557` — tiếng điện thoại tới loa ở **16 kHz** (bản cũ: dòng
+`exec:` 8 kHz).
+
+**Camera nói qua HCNetSDK (cổng 8000, vd H6C) — nghỉ giữa câu thì câu sau trễ ~1,2 giây.**
+Đo trên H6C: kênh nói vừa đóng thì camera cần ~1,24 giây mới cho mở lại (mở bằng phiên
+đăng nhập khác cũng thế), và mic camera **câm suốt lúc kênh mở** kể cả khi không gửi
+tiếng — nên bộ đàm vẫn phải đóng kênh sau 1,5 giây im để nghe được bên kia. Nghỉ 1,5–3,5
+giây giữa hai câu là câu sau phải chờ camera nhả kênh. Nói liền một mạch: trễ ~0,1–0,4
+giây. Từ 0.4.1–0.5.0 tích hợp giữ sẵn đăng nhập (mở kênh 26–37 ms thay vì ~0,6 s), chờ
+camera nhả kênh thay vì bỏ mất câu ("alo, alo"), và bỏ bớt khoảng lặng để không tích trễ.
 
 Xem / nói từ xa qua 4G: [README chính → Xem và nói từ xa](README.md#xem-và-nói-từ-xa-4g)
 (mở cổng 8555/TCP, máy go2rtc không đi VPN, mạng `172.16–31.x.x` thì thêm `filters: ips`).

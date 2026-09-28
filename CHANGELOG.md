@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.0 - 2026-09-29
+
+### Bộ đàm 16 kHz — tiếng điện thoại tới loa rõ như TTS
+- Dòng go2rtc mới: `rtsp://<HA>:8557/<camera>/<khoá>#backchannel=1`. Tích hợp tự mở một máy
+  chủ RTSP nhỏ (cổng 8557) khai rãnh kênh ngược `opus/48000/2`; go2rtc chọn Opus với trình duyệt
+  và chuyển nguyên từng gói sang, HA giải mã bằng PyAV (có sẵn cho `stream`) ra đúng tần số loa —
+  16 kHz với Imou 8086 và EZVIZ HCNetSDK. Không cần add-on.
+- Vì sao: WebRTC của go2rtc 1.9.14 chỉ nhận từ trình duyệt Opus 48 kHz / PCMU / PCMA 8 kHz, còn
+  lệnh `exec:` nhận dòng byte không ranh giới gói — chỉ G.711 8 kHz dùng được, cắt mất dải trên
+  4 kHz. Đo thật: go2rtc đẩy 379 gói Opus trong 8 giây qua kênh xen TCP; test gửi tiếng 6 kHz
+  qua trọn đường và tiếng ấy còn nguyên ở loa 16 kHz.
+- `get_intercom_source` trả dòng `rtsp://` (kèm `exec_source` — dòng `exec:` 8 kHz cũ); HA thiếu
+  bộ giải mã Opus hay cổng 8557 bị chiếm thì trả dòng `exec:` như trước. Dòng `exec:` đã dán vẫn
+  chạy (khoá không đổi).
+
+### Bộ đàm không tích trễ
+- Chủ máy: "bị trễ so với thực tế". Đo trong HA: phát hết hàng đợi đúng nhịp thì cả lượt nói trễ
+  đúng bằng lúc chờ mở kênh (tới 1,25 s khi camera vừa đóng kênh chưa nhả) cộng 0,3 s đệm đầu câu.
+- Nay mỗi khúc tiếng bộ đàm mang lúc nó tới HA; khúc **im lặng** đã trễ quá 0,15 s thì bỏ — hàng
+  đợi đuổi kịp qua các khoảng lặng (trước câu, giữa các từ), tiếng nói không bị bỏ. Đo trên H6C:
+  mỗi lượt bỏ 0,18–1,76 s lặng.
+- EZVIZ / Hikvision (HCNetSDK): nghỉ giữa câu 1,5–3,5 s thì câu sau vẫn trễ ~1,2 s — camera cần
+  ~1,24 s mới cho mở lại kênh vừa đóng (mở bằng phiên đăng nhập khác cũng vậy), và mic camera câm
+  suốt lúc kênh mở kể cả khi không gửi tiếng, nên không giữ kênh mở được. README ghi rõ.
+
+### README
+- Mục Bộ đàm viết lại cho dòng `rtsp://`; cách kiểm cổng 8557 bằng `nc`.
+- "Không muốn mở cổng": STUN (không làm gì), ngrok có sẵn trong go2rtc, máy chủ TURN, VPN; vì sao
+  Cloudflare Tunnel / Nabu Casa không chở mic cho go2rtc.
+
 ## 0.4.2 - 2026-09-29
 
 ### Bộ đàm EZVIZ / Hikvision: nói "alo, alo" không còn mất câu sau

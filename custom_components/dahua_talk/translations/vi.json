@@ -48,7 +48,7 @@
       },
       "reconfigure": {
         "title": "Cấu hình lại camera",
-        "description": "Khoá bộ đàm được GIỮ — dòng exec: đã dán trong go2rtc.yaml vẫn dùng được. Để trống mật khẩu là giữ mật khẩu cũ.",
+        "description": "Khoá bộ đàm được GIỮ — dòng đã dán trong go2rtc.yaml (rtsp:// hay exec:) vẫn dùng được. Để trống mật khẩu là giữ mật khẩu cũ.",
         "data": {
           "host": "IP camera",
           "port": "Cổng nói",
@@ -110,7 +110,7 @@
   "services": {
     "get_intercom_source": {
       "name": "Dòng go2rtc cho bộ đàm",
-      "description": "Trả dòng exec: dán vào go2rtc.yaml (cuối danh sách nguồn của luồng camera) để thẻ WebRTC Camera nói ra loa camera.",
+      "description": "Trả dòng dán vào go2rtc.yaml (cuối danh sách nguồn của luồng camera) để thẻ WebRTC Camera nói ra loa camera: nguồn rtsp:// cổng 8557 (tiếng điện thoại Opus, phát 16 kHz), hoặc dòng exec: (8 kHz) khi HA không giải mã được Opus. exec_source là dòng 8 kHz, cho go2rtc không với tới cổng 8557.",
       "fields": {
         "entity_id": {
           "name": "Loa camera",

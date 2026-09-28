@@ -42,12 +42,13 @@ class LoaGia:
     def __init__(self):
         self.phien: list[bytes] = []
 
-    async def async_play_pcm(self, chunks):
+    async def async_play_pcm(self, chunks, tan_so=8000, song=False):
         du = b""
         async for c in chunks:
-            du += c
+            du += c[1] if song else c
         self.phien.append(du)
-        return len(du) / 16000
+        self.tan_so = tan_so
+        return len(du) / (2 * tan_so)
 
 
 def _day(ic, pcm, khuc=320):

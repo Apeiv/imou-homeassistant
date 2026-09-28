@@ -20,7 +20,7 @@ import array
 import asyncio
 import hmac
 import logging
-import math
+import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
+from .speaker import NGUONG_IM_DB, muc_db
 from .talk import TAN_SO
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Mức coi là có tiếng người (dBFS, RMS từng khúc). Mic tắt trong trình duyệt gửi
 #: số 0; phòng yên sau lọc ồn của trình duyệt dưới -55.
-NGUONG_DB = -45.0
+NGUONG_DB = NGUONG_IM_DB
 #: Im ngần này giây thì đóng kênh để nghe bên kia.
 IM_GIAY = 1.5
 #: Giữ ngần này giây tiếng ngay trước lúc có tiếng — khỏi mất âm đầu câu.
@@ -69,30 +70,25 @@ def alaw_to_pcm(b: bytes) -> bytes:
     return array.array("h", (_ALAW[x] for x in b)).tobytes()
 
 
-def _muc_db(pcm: bytes) -> float:
-    a = array.array("h", pcm[: len(pcm) // 2 * 2])
-    tong = sum(x * x for x in a)
-    return 10 * math.log10(tong / len(a) / 32768.0 ** 2) if tong else -120.0
-
-
 class Intercom:
-    """Một phiên bộ đàm: nhận PCM16 8 kHz, mở loa khi có tiếng, đóng khi im."""
+    """Một phiên bộ đàm: nhận PCM16 ``tan_so`` Hz, mở loa khi có tiếng, đóng khi im."""
 
-    def __init__(self, hass: HomeAssistant, speaker: "Speaker") -> None:
-        self.hass, self.speaker = hass, speaker
+    def __init__(self, hass: HomeAssistant, speaker: "Speaker", tan_so: int = TAN_SO) -> None:
+        self.hass, self.speaker, self.tan_so = hass, speaker, tan_so
         self.seconds = 0.0            # tổng số giây đã phát ra loa
         self._hang: asyncio.Queue[bytes | None] | None = None
         self._viec: list[asyncio.Task] = []
-        self._dem = b""
+        self._dem: list[tuple[float, bytes]] = []     # (lúc tới, PCM) ngay trước tiếng người
         self._im = 0.0
 
-    async def _nguon(self, hang: asyncio.Queue) -> AsyncIterator[bytes]:
+    async def _nguon(self, hang: asyncio.Queue) -> AsyncIterator[tuple[float, bytes]]:
         while (khuc := await hang.get()) is not None:
             yield khuc
 
     async def _phat(self, hang: asyncio.Queue) -> None:
         try:
-            self.seconds += await self.speaker.async_play_pcm(self._nguon(hang))
+            self.seconds += await self.speaker.async_play_pcm(self._nguon(hang), self.tan_so,
+                                                              song=True)
         except Exception as exc:  # noqa: BLE001 — loa hỏng một lượt không được giết cả phiên
             _LOGGER.warning("intercom: cannot play to camera: %s", exc)
             # Nguồn còn đang đợi thì rút cạn để khỏi treo người đẩy.
@@ -103,16 +99,21 @@ class Intercom:
         pcm = pcm[: len(pcm) // 2 * 2]
         if not pcm:
             return
-        co_tieng = _muc_db(pcm) > NGUONG_DB
-        self._im = 0.0 if co_tieng else self._im + len(pcm) / (2 * TAN_SO)
+        luc = time.monotonic()
+        co_tieng = muc_db(pcm) > NGUONG_DB
+        self._im = 0.0 if co_tieng else self._im + len(pcm) / (2 * self.tan_so)
         if self._hang is None:
             if not co_tieng:
-                self._dem = (self._dem + pcm)[-int(DEM_GIAY * TAN_SO) * 2:]
+                self._dem.append((luc, pcm))
+                while sum(len(p) for _t, p in self._dem[1:]) >= DEM_GIAY * self.tan_so * 2:
+                    self._dem.pop(0)
                 return
             self._hang = asyncio.Queue()
             self._viec.append(self.hass.async_create_task(self._phat(self._hang)))
-            pcm, self._dem = self._dem + pcm, b""
-        self._hang.put_nowait(pcm)
+            for muc in self._dem:                   # đệm đầu câu giữ đúng lúc tới của nó
+                self._hang.put_nowait(muc)
+            self._dem = []
+        self._hang.put_nowait((luc, pcm))
         if self._im >= IM_GIAY:
             self.stop_talking()
 
@@ -121,7 +122,7 @@ class Intercom:
         if self._hang is not None:
             self._hang.put_nowait(None)
             self._hang = None
-        self._dem, self._im = b"", 0.0
+        self._dem, self._im = [], 0.0
 
     async def async_close(self) -> None:
         self.stop_talking()
