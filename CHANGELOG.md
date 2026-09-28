@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 - 2026-09-29
+
+### Bộ đàm EZVIZ / Hikvision: nói "alo, alo" không còn mất câu sau
+- Sau khi đóng kênh đàm thoại, H6C cần ~1,2 s mới nhả kênh (đo: mở lại sau 1 s mất 259 ms, sau
+  0,2 s mất 1036 ms, mở ngay thì camera từ chối "mã 29"). Bộ đàm đóng kênh sau 1,5 s im lặng để
+  nghe bên kia, nên câu nói tiếp đúng lúc ấy bị từ chối và mất hẳn.
+- Nay camera báo mã 29 lúc mở kênh thì chờ 0,3 s rồi mở lại, tối đa 3 s; tiếng nói trong lúc chờ
+  vẫn nằm hàng đợi. Đo thật: 5 lượt nói nối liền đều phát (lượt sát nhau mở sau ~1,2 s).
+
 ## 0.4.1 - 2026-09-29
 
 ### Bộ đàm EZVIZ / Hikvision hết chậm: giữ đăng nhập HCNetSDK giữa các lượt nói

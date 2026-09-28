@@ -47,6 +47,8 @@ _TOI_DA_GIAY = 300.0
 NGHI_GIAY = 60
 #: Còn ngần này giây nữa là nó tự thoát thì thôi dùng lại — tránh gửi lệnh đúng lúc nó đang thoát.
 _BIEN_NGHI = 5.0
+#: Camera vừa đóng kênh thì chờ nó nhả kênh tối đa ngần này giây trước khi báo hỏng.
+_CHO_NHA_KENH = 3.0
 _MO_KENH = struct.pack(">I", 0xFFFFFFFF)
 _DONG_KENH = struct.pack(">I", 0)
 
@@ -134,10 +136,22 @@ class TroGiup:
         return self.p.poll() is None and time.monotonic() - self.ranh_tu < NGHI_GIAY - _BIEN_NGHI
 
     def mo_kenh(self) -> None:
-        self._gui(_MO_KENH)
-        dong = self._doc(_CHO_MO_GIAY)
-        if dong != "OK":
-            raise TalkError(dong or "HCNetSDK helper did not answer")
+        """Mở kênh đàm thoại. Camera vừa đóng kênh chưa nhả xong thì chờ nó nhả rồi mở lại.
+
+        Đo 29/09/2026 trên H6C: sau ``StopVoiceCom`` camera cần ~1,2 s mới nhả kênh — mở lại
+        sau 0,2–1 s thì SDK tự chờ (259–1036 ms), mở ngay thì camera từ chối "(mã 29)" (thao tác
+        thất bại). Bộ đàm gặp đúng cảnh ấy khi nói "alo, alo": câu sau mở kênh đúng lúc câu
+        trước vừa đóng và bị mất."""
+        het = time.monotonic() + _CHO_NHA_KENH
+        while True:
+            self._gui(_MO_KENH)
+            dong = self._doc(_CHO_MO_GIAY)
+            if dong == "OK":
+                return
+            ma = re.search(r"mã (\d+)", dong)
+            if not (ma and ma.group(1) == "29" and time.monotonic() < het):
+                raise TalkError(dong or "HCNetSDK helper did not answer")
+            time.sleep(0.3)
 
     def dong_kenh(self, cho: float) -> bool:
         """Báo hết tiếng; nó phát nốt phần đệm rồi đóng kênh. Trả False nếu không đáp kịp."""

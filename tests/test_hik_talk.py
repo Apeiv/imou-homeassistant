@@ -44,6 +44,9 @@ mo, n_khung = False, 0
 while len(d := sys.stdin.buffer.read(4)) == 4:
     n = struct.unpack(">I", d)[0]
     if n == 0xFFFFFFFF:
+        if ban := int(os.environ.get("HIK_BAN_CON", "0")):
+            os.environ["HIK_BAN_CON"] = str(ban - 1)
+            bao.write("LOI camera không mở kênh đàm thoại (mã 29)\\n"); continue
         mo, n_khung = True, 0; bao.write("OK\\n")
     elif n == 0:
         if mo: nhat_ky.write(f"luot {{n_khung}}\\n")
@@ -115,6 +118,29 @@ def test_sap_toi_luc_tu_thoat_vi_ngoi_yen_thi_dung_ban_moi(gia):
         s.send_pcm(b"\x00\x01" * 2048)
     mo.close()
     assert _nhat_ky(ghi) == ["dang_nhap", "luot 2", "dang_xuat", "dang_nhap", "luot 2", "dang_xuat"]
+
+
+def test_camera_chua_nha_kenh_thi_cho_roi_mo_lai(gia, monkeypatch):
+    """Đo 29/09/2026: mở lại ngay sau lúc đóng thì H6C từ chối (mã 29); ~1,2 s sau là mở được."""
+    ffmpeg, ghi = gia
+    monkeypatch.setenv("HIK_BAN_CON", "2")
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    t0 = time.monotonic()
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    assert time.monotonic() - t0 >= 0.6                   # hai lần chờ 0,3 s
+    mo.close()
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 2", "dang_xuat"]
+
+
+def test_camera_ban_qua_lau_thi_bao_loi(gia, monkeypatch):
+    ffmpeg, _ghi = gia
+    monkeypatch.setenv("HIK_BAN_CON", "100")
+    monkeypatch.setattr(hik_talk, "_CHO_NHA_KENH", 0.5)
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    with pytest.raises(TalkError, match="29"):
+        mo().__enter__()
+    mo.close()
 
 
 def test_sai_mat_khau_bao_loi_dang_nhap(gia):
