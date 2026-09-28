@@ -8,8 +8,14 @@ không cần tài khoản nhà phát triển EZVIZ.
 Hướng dẫn chung (SmartPSS, Assist, mở cổng 4G, go2rtc, bảo mật) ở [README chính](README.md);
 trang này chỉ ghi phần **khác** của EZVIZ.
 
+> **Từ 0.4.0 — loa qua HCNetSDK (cổng 8000).** Có đời EZVIZ **không có** kênh tiếng ngược
+> (H6C: không ONVIF, cổng HTTP bị khoá), có đời **có mà loa câm** ([issue #1](https://github.com/TriTue2011/imou-homeassistant/issues/1)).
+> Cách chắc chạy: thư viện **HCNetSDK** của Hikvision nói qua cổng thiết bị **8000** — đo thật
+> trên H6C: camera báo AAC 16 kHz, `tts.speak` phát rõ. Xem [Loa qua HCNetSDK](#loa-qua-hcnetsdk-cổng-8000).
+
 **Mục lục**
 
+1. [Loa qua HCNetSDK (cổng 8000)](#loa-qua-hcnetsdk-cổng-8000)
 1. [Vì sao EZVIZ đi đường khác Imou](#vì-sao-ezviz-đi-đường-khác-imou)
 2. [Chuẩn bị camera](#chuẩn-bị-camera)
 3. [Thêm camera vào tích hợp](#thêm-camera-vào-tích-hợp)
@@ -20,6 +26,28 @@ trang này chỉ ghi phần **khác** của EZVIZ.
 8. [Đã kiểm những gì](#đã-kiểm-những-gì)
 
 ---
+
+## Loa qua HCNetSDK (cổng 8000)
+
+Chạy cả trên **HA OS** lẫn HA Container, máy **x86_64** (Raspberry Pi / ARM chưa có bản).
+
+1. **Tải SDK** (bản quyền Hikvision nên tích hợp không kèm): trang Hikvision →
+   [Device Network SDK (Linux 64-bit)](https://www.hikvision.com/en/support/tools/hitools/clf4633a00e385d6ea/)
+   → tệp dạng `EN-HCNetSDKV6.1.9.x_…_linux64.zip`.
+2. **Chép thư mục `lib`** trong gói đó vào thư mục cấu hình HA thành **`/config/hcnetsdk/lib`**
+   (phải có `/config/hcnetsdk/lib/libhcnetsdk.so`). HA OS: dùng add-on *Samba share* / *File
+   editor* / *SSH*; HA Container: chép vào thư mục đang gắn làm `/config`.
+3. **Thêm camera** (menu EZVIZ, như dưới). Có SDK thì tích hợp tự chọn đường cổng 8000 và
+   đăng nhập thử (mở rồi đóng kênh đàm thoại — không phát gì). Camera đã thêm từ trước: bấm
+   **Cấu hình lại** rồi lưu để chuyển sang đường này.
+
+Cách chạy: container HA là Alpine (musl) nên không nạp thẳng được HCNetSDK (dựng cho glibc).
+Tích hợp mang theo chương trình trợ giúp nhỏ `hik/hik_noi-x86_64` (mã nguồn `hik/hik_noi.c`)
+và bộ glibc đi kèm (`hik/glibc-x86_64`, giấy phép ở `hik/README.md`), chạy như tiến trình con;
+ffmpeg của HA mã hoá tiếng theo đúng mã camera đòi (AAC / G.711).
+
+Camera phải mở cổng **8000** trong mạng nhà (EZVIZ Studio → Remote Configuration → Network →
+General: *Device Port* 8000). Mic vẫn đi luồng RTSP như trước.
 
 ## Vì sao EZVIZ đi đường khác Imou
 

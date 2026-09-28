@@ -64,7 +64,7 @@
       "invalid_auth": "Camera từ chối đăng nhập (sai vài lần là camera khoá phiên — kiểm kỹ trước khi thử lại).",
       "cannot_connect": "Không nối được cổng nói của camera.",
       "invalid_mic_url": "URL mic phải bắt đầu bằng rtsp://, http:// hoặc https://",
-      "no_backchannel": "Camera nói RTSP nhưng luồng này không có kênh tiếng ngược (camera không có loa, hoặc sai đường dẫn luồng)."
+      "no_backchannel": "Luồng RTSP không có kênh tiếng ngược. EZVIZ / Hikvision: chép thư mục lib của \"Device Network SDK (Linux 64-bit)\" (tải ở trang Hikvision) vào /config/hcnetsdk/lib — loa sẽ nói qua SDK cổng 8000."
     },
     "abort": {
       "already_configured": "Camera này đã được thêm.",

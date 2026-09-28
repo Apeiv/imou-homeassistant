@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 - 2026-09-28
+
+### EZVIZ / Hikvision nói ra loa qua HCNetSDK (cổng 8000) — chạy cả trên HA OS
+- EZVIZ H6C không có kênh tiếng ngược RTSP, không ONVIF, cổng HTTP bị khoá; có đời EZVIZ có kênh
+  ngược mà loa câm (issue #1). HCNetSDK của Hikvision qua cổng 8000 thì mở được kênh đàm thoại:
+  đo thật trên H6C — camera báo AAC 16 kHz, `tts.speak` phát rõ (chủ máy nghe xác nhận).
+- Container HA (cả HA OS) là Alpine/musl, không nạp được HCNetSDK (glibc): tích hợp mang theo
+  chương trình trợ giúp `hik/hik_noi-x86_64` (mã nguồn kèm) + bộ glibc nhỏ, chạy qua trình nạp
+  glibc đi kèm như tiến trình con. HCNetSDK KHÔNG đi kèm — chép thư mục `lib` của "Device
+  Network SDK (Linux 64-bit)" vào `/config/hcnetsdk/lib`.
+- Thêm / cấu hình lại camera EZVIZ: có SDK thì tự chọn đường cổng 8000 (đăng nhập thử, không
+  phát gì); không có thì giữ đường kênh ngược RTSP như trước. Lỗi "không có kênh ngược" nay chỉ
+  cách cài SDK.
+
 ## 0.3.0 - 2026-09-28
 
 ### Loa camera Imou nói tiếng 16 kHz qua cổng 8086 — rõ hơn hẳn 8 kHz

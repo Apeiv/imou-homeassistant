@@ -10,6 +10,9 @@ DEFAULT_PORT = 37777
 CONF_TALK = "talk_protocol"
 TALK_DAHUA = "dahua"
 TALK_RTSP = "rtsp"
+#: Hikvision / EZVIZ qua HCNetSDK cổng 8000 (thư viện người dùng chép vào /config/hcnetsdk/lib).
+TALK_HIK = "hik"
+HIK_SDK_DIR = "hcnetsdk/lib"
 CONF_RTSP_PATH = "rtsp_path"
 #: Loại camera chọn lúc thêm — quyết định những ô cần điền và cách nói.
 CONF_LOAI = "camera_type"

@@ -22,7 +22,8 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT, 
 
 from .const import (CONF_LOAI, CONF_MIC_URL, CONF_NGHE_MIC, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT,
                     DEFAULT_RTSP_PATH, DEFAULT_RTSP_PORT, DOMAIN, LOAI_EZVIZ, LOAI_IMOU,
-                    LOAI_ONVIF, TALK_DAHUA, TALK_RTSP)
+                    HIK_SDK_DIR, LOAI_ONVIF, TALK_DAHUA, TALK_HIK, TALK_RTSP)
+from .hik_talk import check_hik_talk, sdk_san_sang
 from .rtsp_talk import NoBackchannelError, check_rtsp_talk
 from .talk import AuthError, TalkError, check_login
 
@@ -72,14 +73,17 @@ def url_mic_ezviz(host: str, password: str) -> str:
     return f"rtsp://admin:{quote(password, safe='')}@{host}:554/Streaming/Channels/102"
 
 
-def _day_du(loai: str, v: dict[str, Any]) -> dict[str, Any]:
-    """Điền những gì loại camera đã cố định (cách nói, cổng, tài khoản, luồng)."""
+def _day_du(loai: str, v: dict[str, Any], hik: bool = False) -> dict[str, Any]:
+    """Điền những gì loại camera đã cố định (cách nói, cổng, tài khoản, luồng).
+
+    ``hik``: EZVIZ nói qua HCNetSDK cổng 8000 (có SDK trong /config/hcnetsdk/lib) thay vì kênh
+    ngược RTSP — đo thật 28/09/2026: H6C không có kênh ngược, có đời EZVIZ có mà loa câm."""
     v = {**v, CONF_LOAI: loai}
     if loai == LOAI_IMOU:
         v[CONF_TALK] = TALK_DAHUA
         v.setdefault(CONF_PORT, DEFAULT_PORT)
         return v
-    v[CONF_TALK] = TALK_RTSP
+    v[CONF_TALK] = TALK_HIK if (hik and loai == LOAI_EZVIZ) else TALK_RTSP
     if loai == LOAI_EZVIZ:
         v.update({CONF_USERNAME: "admin", CONF_PORT: DEFAULT_RTSP_PORT,
                   CONF_RTSP_PATH: DEFAULT_RTSP_PATH})
@@ -121,7 +125,11 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
         # Đăng nhập thử MỘT lần: sai thì báo, không thử lại — camera khoá phiên sau vài
         # lần sai. RTSP thì chỉ hỏi camera có kênh ngược (DESCRIBE), không phát gì.
         try:
-            if v[CONF_TALK] == TALK_RTSP:
+            if v[CONF_TALK] == TALK_HIK:
+                await self.hass.async_add_executor_job(
+                    check_hik_talk, v[CONF_HOST], v[CONF_USERNAME], v[CONF_PASSWORD],
+                    self.hass.config.path(HIK_SDK_DIR))
+            elif v[CONF_TALK] == TALK_RTSP:
                 await self.hass.async_add_executor_job(
                     check_rtsp_talk, v[CONF_HOST], v[CONF_USERNAME], v[CONF_PASSWORD],
                     v[CONF_PORT], v[CONF_RTSP_PATH])
@@ -136,6 +144,10 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.debug("dahua_talk login check failed: %s", exc)
             errors["base"] = "cannot_connect"
         return not errors
+
+    def _co_hik(self) -> bool:
+        """Có HCNetSDK (người dùng chép vào /config/hcnetsdk/lib) + bản trợ giúp cho máy này."""
+        return sdk_san_sang(self.hass.config.path(HIK_SDK_DIR))
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(step_id="user", menu_options=[LOAI_IMOU, LOAI_EZVIZ, LOAI_ONVIF])
@@ -152,7 +164,7 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _them(self, loai: str, user_input: dict[str, Any] | None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            v = _day_du(loai, _tu_form(loai, user_input))
+            v = _day_du(loai, _tu_form(loai, user_input), self._co_hik())
             await self.async_set_unique_id(f"{v[CONF_HOST]}:{v[CONF_PORT]}")
             self._abort_if_unique_id_configured()
             if (mic := _url_mic(v)) is None:
@@ -170,14 +182,16 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             moi = _day_du(loai, {**entry.data, **_tu_form(loai, user_input), CONF_PASSWORD:
-                                 user_input.get(CONF_PASSWORD) or entry.data[CONF_PASSWORD]})
+                                 user_input.get(CONF_PASSWORD) or entry.data[CONF_PASSWORD]},
+                          self._co_hik())
             uid = f"{moi[CONF_HOST]}:{moi[CONF_PORT]}"
             if uid != entry.unique_id:
                 await self.async_set_unique_id(uid)
                 self._abort_if_unique_id_configured()
             if (mic := _url_mic(moi)) is None:
                 errors[CONF_MIC_URL] = "invalid_mic_url"
-            elif (_ket_noi(moi) == _ket_noi(_day_du(loai, dict(entry.data)))
+            elif (_ket_noi(moi) == _ket_noi(_day_du(loai, dict(entry.data),
+                                                    entry.data.get(CONF_TALK) == TALK_HIK))
                   or await self._dang_nhap_thu(moi, errors)):
                 # Chỉ đổi URL mic thì không đăng nhập lại camera.
                 return self.async_update_reload_and_abort(

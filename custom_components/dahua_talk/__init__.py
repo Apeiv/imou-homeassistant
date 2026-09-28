@@ -32,8 +32,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAULT_RTSP_PATH,
-                    DOMAIN, TALK_RTSP)
+                    DOMAIN, HIK_SDK_DIR, TALK_HIK, TALK_RTSP)
 from .intercom import CONF_INTERCOM_KEY, IntercomView, go2rtc_source
+from .hik_talk import MoPhienHik
 from .http_talk import MoPhienImou
 from .rtsp_talk import RtspTalkSession
 from .speaker import Speaker
@@ -111,12 +112,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-def _mo_phien_noi(d, ffmpeg: str = "ffmpeg") -> callable:
+def _mo_phien_noi(d, ffmpeg: str = "ffmpeg", sdk_dir: str = "") -> callable:
     """Hàm mở một phiên nói theo cách camera hỗ trợ (mục cũ không có khoá này là Dahua).
 
-    Imou/Dahua: cổng 8086 (AAC 16 kHz, rõ hơn) trước, 37777 (PCM 8 kHz) dự phòng."""
+    Imou/Dahua: cổng 8086 (AAC 16 kHz, rõ hơn) trước, 37777 (PCM 8 kHz) dự phòng.
+    EZVIZ / Hikvision không có kênh ngược dùng được: HCNetSDK cổng 8000."""
     host, user, pw = d[CONF_HOST], d[CONF_USERNAME], d[CONF_PASSWORD]
     port = int(d.get(CONF_PORT, DEFAULT_PORT))
+    if d.get(CONF_TALK) == TALK_HIK:
+        return MoPhienHik(host, user, pw, sdk_dir=sdk_dir, ffmpeg=ffmpeg)
     if d.get(CONF_TALK) == TALK_RTSP:
         path = d.get(CONF_RTSP_PATH) or DEFAULT_RTSP_PATH
         return lambda: RtspTalkSession(host, user, pw, port=port, path=path)
@@ -131,7 +135,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
             entry, data={**entry.data, CONF_INTERCOM_KEY: secrets.token_urlsafe(24)})
     d = entry.data
     entry.runtime_data = DahuaTalkData(
-        speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary)),
+        speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary,
+                                            hass.config.path(HIK_SDK_DIR))),
         mic_url=str(d.get(CONF_MIC_URL) or ""),
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
