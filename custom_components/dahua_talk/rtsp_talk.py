@@ -111,6 +111,9 @@ def duong_tieng_nguoc(sdp: str) -> tuple[str, int] | None:
 class RtspTalkSession:
     """Một phiên nói qua kênh ngược RTSP. Dùng với ``with``. Chặn (blocking)."""
 
+    #: ``send_pcm`` nhận PCM16 mono ở tần số này.
+    tan_so = TAN_SO
+
     def __init__(self, host: str, username: str, password: str, *, port: int = CONG_RTSP,
                  path: str = DUONG_MAC_DINH, timeout: float = 5.0) -> None:
         self.host, self.username, self.password = host, username, password

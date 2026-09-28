@@ -2,8 +2,8 @@
 
 Vòng nghe: ffmpeg đọc mic camera (URL go2rtc/RTSP) → PCM16 mono 16 kHz → đưa vào
 ``async_accept_pipeline_from_satellite`` bắt đầu từ bước bắt từ gọi (từ gọi chọn
-trong pipeline, vd okay_nabu của openWakeWord). Trả lời TTS xin sẵn WAV 8 kHz một
-kênh (``tts_options``) — đúng định dạng loa Dahua, HA tự đổi — rồi phát ra loa.
+trong pipeline, vd okay_nabu của openWakeWord). Trả lời TTS xin sẵn WAV một
+kênh đúng tần số loa (``tts_options``: 16 kHz qua cổng 8086, 8 kHz qua 37777) rồi phát ra loa.
 
 Hội thoại nối tiếp: khi hiểu lệnh báo ``continue_conversation`` (câu trả lời là
 câu hỏi lại), lượt sau bắt đầu thẳng từ bước nghe câu nói, không cần từ gọi.
@@ -151,7 +151,9 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
 
     @property
     def tts_options(self) -> dict[str, Any] | None:
-        return {tts.ATTR_PREFERRED_FORMAT: "wav", tts.ATTR_PREFERRED_SAMPLE_RATE: 8000,
+        # Xin TTS đúng tần số loa (16 kHz qua cổng 8086, 8 kHz qua 37777) — khỏi đổi hai lần.
+        return {tts.ATTR_PREFERRED_FORMAT: "wav",
+                tts.ATTR_PREFERRED_SAMPLE_RATE: self._data.speaker.tan_so,
                 tts.ATTR_PREFERRED_SAMPLE_CHANNELS: 1, tts.ATTR_PREFERRED_SAMPLE_BYTES: 2}
 
     @callback
@@ -384,13 +386,14 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
         loa = self._data.speaker
         phat: asyncio.Task | None = None
         try:
-            pcm = tieng_ting()
+            ts = loa.tan_so
+            pcm = tieng_ting(ts)
 
             async def _mot():
                 yield pcm
             async with asyncio.timeout(_TING_TOI_DA):
                 truoc = loa.het_tieng           # đọc TRƯỚC: HA chạy task ngay tới lần chờ đầu
-                phat = self.hass.async_create_task(loa.async_play_pcm(_mot()))
+                phat = self.hass.async_create_task(loa.async_play_pcm(_mot(), ts))
                 while not phat.done() and loa.het_tieng == truoc:
                     await asyncio.sleep(0.02)
                 con = loa.het_tieng + _TING_DEM - time.monotonic()

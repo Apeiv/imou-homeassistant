@@ -317,8 +317,8 @@ async def test_bat_duoc_tu_goi_thi_loa_keu_ting(hass):
     import time
     from custom_components.dahua_talk import assist_satellite as sat
 
-    pcm = sat.tieng_ting()
-    assert 0.25 < len(pcm) / 2 / 8000 < 0.4, "ngắn: camera tắt mic lúc loa phát"
+    pcm = sat.tieng_ting(16000)                 # loa Imou nói qua cổng 8086: 16 kHz
+    assert 0.25 < len(pcm) / 2 / 16000 < 0.4, "ngắn: camera tắt mic lúc loa phát"
     muc = _muc()
     await _nap(hass, muc)
     reg = er.async_get(hass)
@@ -333,7 +333,8 @@ async def test_bat_duoc_tu_goi_thi_loa_keu_ting(hass):
     loa = muc.runtime_data.speaker
     dong_phien = asyncio.Event()
 
-    async def play_gia(chunks):
+    async def play_gia(chunks, tan_so=8000):
+        assert tan_so == 16000, "ting sinh đúng tần số loa"
         phat.append(b"".join([c async for c in chunks]))
         assert ve_tinh._chan_ting, "đang kêu ting thì bỏ tiếng mic"
         loa.het_tieng = time.monotonic()            # gói tiếng cuối vừa gửi

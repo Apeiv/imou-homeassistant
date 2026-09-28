@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import voluptuous as vol
 
+from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse, callback
@@ -33,9 +34,9 @@ from homeassistant.helpers.typing import ConfigType
 from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAULT_RTSP_PATH,
                     DOMAIN, TALK_RTSP)
 from .intercom import CONF_INTERCOM_KEY, IntercomView, go2rtc_source
+from .http_talk import MoPhienImou
 from .rtsp_talk import RtspTalkSession
 from .speaker import Speaker
-from .talk import TalkSession
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -110,14 +111,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-def _mo_phien_noi(d) -> callable:
-    """Hàm mở một phiên nói theo cách camera hỗ trợ (mục cũ không có khoá này là Dahua)."""
+def _mo_phien_noi(d, ffmpeg: str = "ffmpeg") -> callable:
+    """Hàm mở một phiên nói theo cách camera hỗ trợ (mục cũ không có khoá này là Dahua).
+
+    Imou/Dahua: cổng 8086 (AAC 16 kHz, rõ hơn) trước, 37777 (PCM 8 kHz) dự phòng."""
     host, user, pw = d[CONF_HOST], d[CONF_USERNAME], d[CONF_PASSWORD]
     port = int(d.get(CONF_PORT, DEFAULT_PORT))
     if d.get(CONF_TALK) == TALK_RTSP:
         path = d.get(CONF_RTSP_PATH) or DEFAULT_RTSP_PATH
         return lambda: RtspTalkSession(host, user, pw, port=port, path=path)
-    return lambda: TalkSession(host, user, pw, port=port)
+    return MoPhienImou(host, user, pw, port=port, ffmpeg=ffmpeg)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) -> bool:
@@ -128,7 +131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
             entry, data={**entry.data, CONF_INTERCOM_KEY: secrets.token_urlsafe(24)})
     d = entry.data
     entry.runtime_data = DahuaTalkData(
-        speaker=Speaker(hass, _mo_phien_noi(d)),
+        speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary)),
         mic_url=str(d.get(CONF_MIC_URL) or ""),
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

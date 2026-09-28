@@ -118,6 +118,9 @@ def _gen1(mk: str) -> str:
 class TalkSession:
     """Một phiên nói: đăng nhập, mở kênh, phát, đóng. Dùng với ``with``. Chặn (blocking)."""
 
+    #: ``send_pcm`` nhận PCM16 mono ở tần số này.
+    tan_so = TAN_SO
+
     def __init__(self, host: str, username: str, password: str, *, port: int = CONG,
                  timeout: float = 5.0) -> None:
         self.host, self.username, self.password = host, username, password

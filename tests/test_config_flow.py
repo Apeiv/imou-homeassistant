@@ -188,9 +188,10 @@ async def test_cau_hinh_lai_ezviz_dung_o_cua_ezviz(hass):
 def test_chon_phien_noi_theo_cau_hinh():
     from custom_components.dahua_talk import _mo_phien_noi
     from custom_components.dahua_talk.rtsp_talk import RtspTalkSession
-    from custom_components.dahua_talk.talk import TalkSession
-    cu = _mo_phien_noi({"host": "h", "port": 37777, "username": "u", "password": "p"})()
-    assert isinstance(cu, TalkSession)                                  # mục cũ: Dahua
+    from custom_components.dahua_talk.http_talk import MoPhienImou
+    cu = _mo_phien_noi({"host": "h", "port": 37777, "username": "u", "password": "p"})
+    assert isinstance(cu, MoPhienImou) and cu.tan_so == 16000         # mục cũ: Imou/Dahua, 8086 trước
+    assert cu.port == 37777                                             # dự phòng 37777 giữ cổng đã khai
     moi = _mo_phien_noi({"host": "h", "port": 554, "username": "u", "password": "p",
                          "talk_protocol": "rtsp", "rtsp_path": "/Streaming/Channels/101"})()
     assert isinstance(moi, RtspTalkSession) and moi.url == "rtsp://h:554/Streaming/Channels/101"

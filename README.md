@@ -57,6 +57,13 @@ qua **cổng TCP 37777** — đúng đường app Imou dùng (giao thức NetSDK
 Đã chạy thật trên 4 camera Imou (trong nhà và ngoài trời): mở kênh nói 0,04–0,9
 giây; camera tự tắt mic của nó trong lúc phát nên không tự nghe lại tiếng mình.
 
+Từ 0.3.0 loa đi **cổng TCP 8086** trước — kênh nói HTTP riêng của Imou, tiếng **AAC
+16 kHz** (chính camera khai định dạng này). Cổng 37777 chỉ nhận PCM 8 kHz, cắt mất dải
+trên 4 kHz nơi có phụ âm s/x/ch; nghe so sánh cùng câu trên camera thật, 16 kHz rõ hơn
+hẳn. Camera không mở 8086 (hay từ chối) thì tự lùi về 37777 như cũ, một giờ sau thử lại.
+Trình tự byte của cổng 8086 theo [ha-imou-talkback](https://github.com/vnp1978/ha-imou-talkback)
+(MIT), viết lại chạy ngay trong HA — không cần add-on.
+
 ---
 
 ## Cài đặt camera bằng SmartPSS
@@ -138,7 +145,7 @@ Các ô của Imou / Dahua:
 | Tài khoản, Mật khẩu | Tài khoản camera (thường `admin` + mật khẩu thiết bị / mã an toàn in trên tem) |
 | URL tiếng mic | **Không bắt buộc.** Có go2rtc: `http://IP_GO2RTC:1984/api/stream.mp4?src=TEN_LUONG_PHU&video=none&audio=all`. Hoặc URL RTSP luồng phụ của camera. **Bỏ trống thì chỉ dùng loa và bộ đàm** — vệ tinh Assist không nghe gì. |
 
-HA phải tới được camera ở cổng 37777 (cùng mạng LAN là đủ).
+HA phải tới được camera ở cổng 8086 và 37777 (cùng mạng LAN là đủ).
 
 **Sửa sau khi thêm** (từ 0.1.3): Thiết bị & dịch vụ → Assist Camera → ⋮ cạnh camera →
 **Cấu hình lại** — đổi IP, tài khoản, mật khẩu (để trống = giữ cũ) hay *URL tiếng mic*.

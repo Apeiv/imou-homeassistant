@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 - 2026-09-28
+
+### Loa camera Imou nói tiếng 16 kHz qua cổng 8086 — rõ hơn hẳn 8 kHz
+- Kênh nói HTTP riêng của Imou (cổng 8086, `visualtalk.xav`, xác thực WSSE), tiếng AAC
+  16 kHz do ffmpeg của HA mã hoá. Camera tự khai kênh nói là `MPEG4-GENERIC/16000`; cổng
+  37777 chỉ nhận PCM 8 kHz, cắt mất dải trên 4 kHz (phụ âm s/x/ch). Nghe so sánh cùng câu
+  trên camera Imou thật: 16 kHz rõ hơn. Bắt tay 8086 mất ~0,03 giây.
+- Camera không mở 8086 hay từ chối thì tự lùi về 37777 (8 kHz) như trước, một giờ sau thử lại.
+- Câu trả lời Assist xin TTS đúng tần số loa; tiếng ting sinh theo tần số loa; bộ đàm
+  (A-law 8 kHz) được đổi lên 16 kHz trước khi gửi.
+- Trình tự byte theo [ha-imou-talkback](https://github.com/vnp1978/ha-imou-talkback) (MIT),
+  viết lại chạy ngay trong HA — không cần add-on.
+
 ## 0.2.9 - 2026-09-28
 
 ### Hết kẹt "Đang phản hồi" ở MỌI đường — vệ tinh luôn về chờ sau mỗi lượt
