@@ -144,4 +144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if ok:
+        await entry.runtime_data.speaker.async_close()
+    return ok

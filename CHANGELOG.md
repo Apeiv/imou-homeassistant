@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 - 2026-09-29
+
+### Bộ đàm EZVIZ / Hikvision hết chậm: giữ đăng nhập HCNetSDK giữa các lượt nói
+- Chủ máy thử bộ đàm H6C: "chậm hơn Imou". Đo trên H6C: đăng nhập SDK 0,6–1,3 s, đăng xuất
+  0,5 s, còn mở kênh đàm thoại chỉ 0,02–0,27 s. Mỗi lượt nói trước đây đăng nhập lại từ đầu, tiếng
+  bộ đàm dồn hàng đợi suốt lúc ấy nên cả câu phát trễ theo.
+- Chương trình trợ giúp nay sống giữa các lượt: đăng nhập một lần, mỗi lượt chỉ mở / đóng kênh;
+  kênh đóng mà ngồi yên 60 giây thì tự đăng xuất; chết giữa chừng (camera khởi động lại) thì lượt
+  sau đăng nhập lại. Đo thật: lượt đầu mở kênh 393 ms, các lượt sau 26–37 ms.
+- ffmpeg khởi động song song lúc camera mở kênh. Gỡ entry thì đăng xuất ngay.
+- Imou không đổi: bắt tay cổng 8086 vốn chỉ ~0,03 s.
+
 ## 0.4.0 - 2026-09-28
 
 ### EZVIZ / Hikvision nói ra loa qua HCNetSDK (cổng 8000) — chạy cả trên HA OS

@@ -6,11 +6,20 @@
  * glibc mang theo:  ld-linux-x86-64.so.2 --library-path <glibc>:<sdk> hik_noi IP CỔNG TÀI_KHOẢN
  * Mã nguồn đi kèm để ai cũng dựng lại được:  gcc -O2 -o hik_noi hik_noi.c -ldl
  *
- * Giao thức với tích hợp (giống c2a services/hik_noi.py):
- *   env HIK_LIB = thư mục lib của HCNetSDK, HIK_MK = mật khẩu (mã xác minh EZVIZ)
- *   kênh báo (fd trong HIK_BAO_FD, mặc định 3): một dòng "OK <mã> <tần_số>" hoặc "LOI <thông điệp>"
- *   stdin: khung tiếng đã mã hoá, mỗi khung = 4 byte độ dài (big-endian) + dữ liệu; 0 = hết
+ * Giao thức với tích hợp:
+ *   env HIK_LIB = thư mục lib của HCNetSDK, HIK_MK = mật khẩu (mã xác minh EZVIZ),
+ *       HIK_NGHI = ngồi yên (kênh đóng) ngần này giây thì đăng xuất và thoát (mặc định 60)
+ *   kênh báo (fd trong HIK_BAO_FD, mặc định 3), mỗi dòng một tin:
+ *       "SAN <mã> <tần_số>" đăng nhập xong  |  "OK" kênh đã mở  |  "DONG" kênh đã đóng
+ *       "LOI <thông điệp>" hỏng (sau LOI lúc đăng nhập thì chương trình thoát)
+ *   stdin: mỗi mục = 4 byte độ dài (big-endian) + dữ liệu
+ *       0xFFFFFFFF = mở kênh đàm thoại; n > 0 = một khung tiếng; 0 = phát nốt rồi đóng kênh
+ *       hết stdin = đóng kênh (nếu đang mở), đăng xuất, thoát
  *   Mã: AAC (khung ADTS 1024 mẫu) hoặc G711U / G711A (khung 160 byte = 20 ms ở 8 kHz)
+ *
+ * Vì sao giữ đăng nhập giữa các lượt nói: đo 29/09/2026 trên H6C, đăng nhập 0,6–1,3 s và đăng
+ * xuất 0,5 s, còn mở kênh chỉ 0,02–0,27 s. Mỗi lượt bộ đàm mà đăng nhập lại thì tiếng dồn hàng
+ * đợi suốt lúc ấy và cả câu phát trễ theo — chủ máy nghe "chậm hơn Imou".
  *
  * Đo thật 28/09/2026, EZVIZ H6C: đăng nhập cổng 8000 được, camera báo AAC 16 kHz, gửi khung
  * ADTS mỗi 64 ms thì loa phát (chủ máy nghe xác nhận). SDK tự in rác ra stdout — nên kênh báo
@@ -18,6 +27,7 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,27 +134,48 @@ int main(int argc, char **argv) {
         fprintf(bao, "LOI camera đòi mã đàm thoại chưa hỗ trợ (%u)\n", ac.byAudioEncType);
         NET_DVR_Logout(uid); NET_DVR_Cleanup(); return 4;
     }
-    int h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, bo_mic, NULL);
-    if (h < 0) {
-        fprintf(bao, "LOI camera không mở kênh đàm thoại (mã %u)\n", NET_DVR_GetLastError());
-        NET_DVR_Logout(uid); NET_DVR_Cleanup(); return 5;
-    }
-    fprintf(bao, "OK %s %d\n", ma, tan_so);
+    fprintf(bao, "SAN %s %d\n", ma, tan_so);
+    const char *nghi_s = getenv("HIK_NGHI");
+    int nghi_ms = (nghi_s ? atoi(nghi_s) : 60) * 1000;
     int aac = !strcmp(ma, "AAC");
     static unsigned char khung[65536];
+    int h = -1;
     double t0 = -1, da_phat = 0;
     for (;;) {
+        if (h < 0) {                                       /* kênh đóng: chờ lệnh, quá lâu thì thôi */
+            struct pollfd pf = { 0, POLLIN, 0 };
+            if (poll(&pf, 1, nghi_ms) <= 0) break;
+        }
         unsigned char dau[4];
         if (!doc_du(dau, 4)) break;
         uint32_t n = ((uint32_t)dau[0] << 24) | ((uint32_t)dau[1] << 16) | ((uint32_t)dau[2] << 8) | dau[3];
-        if (n == 0 || n > sizeof khung || !doc_du(khung, n)) break;
+        if (n == 0xFFFFFFFFu) {                            /* mở kênh */
+            if (h < 0) h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, bo_mic, NULL);
+            if (h < 0) fprintf(bao, "LOI camera không mở kênh đàm thoại (mã %u)\n", NET_DVR_GetLastError());
+            else fprintf(bao, "OK\n");
+            t0 = -1; da_phat = 0;
+            continue;
+        }
+        if (n == 0) {                                      /* phát nốt phần đệm rồi đóng kênh */
+            if (h >= 0) {
+                if (t0 >= 0) ngu(t0 + da_phat - bay_gio() + 0.5);
+                NET_DVR_StopVoiceCom(h);
+                h = -1;
+            }
+            fprintf(bao, "DONG\n");
+            continue;
+        }
+        if (n > sizeof khung || !doc_du(khung, n)) break;
+        if (h < 0) continue;                               /* khung lạc khi kênh đóng: bỏ */
         if (t0 < 0) t0 = bay_gio();
         ngu(t0 + da_phat - bay_gio());
         NET_DVR_VoiceComSendData(h, (char *)khung, n);
         da_phat += aac ? 1024.0 / tan_so : n / 8000.0;
     }
-    if (t0 >= 0) ngu(t0 + da_phat - bay_gio() + 0.5);   /* loa phát nốt phần đệm */
-    NET_DVR_StopVoiceCom(h);
+    if (h >= 0) {
+        if (t0 >= 0) ngu(t0 + da_phat - bay_gio() + 0.5);
+        NET_DVR_StopVoiceCom(h);
+    }
     NET_DVR_Logout(uid);
     NET_DVR_Cleanup();
     return 0;

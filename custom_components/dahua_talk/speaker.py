@@ -87,6 +87,13 @@ class Speaker:
                 giay += len(du) / (2 * ra)
         return giay
 
+    async def async_close(self) -> None:
+        """Gỡ entry: nhả thứ cách nói còn giữ giữa các lượt (đăng nhập HCNetSDK)."""
+        dong = getattr(self._mo_phien, "close", None)
+        if dong is not None:
+            async with self._lock:
+                await self.hass.async_add_executor_job(dong)
+
     async def async_play_pcm(self, chunks: AsyncIterator[bytes], tan_so: int = TAN_SO) -> float:
         """Phát luồng PCM16 mono ``tan_so`` Hz. Trả số giây đã phát."""
         async with self._lock:

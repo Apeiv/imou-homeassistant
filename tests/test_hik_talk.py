@@ -29,22 +29,30 @@ def _tep(p: Path, noi_dung: str) -> str:
 
 @pytest.fixture
 def gia(tmp_path):
-    """Trợ giúp giả (nói đúng giao thức) + ffmpeg giả (mỗi 2048 byte PCM → một khung ADTS)."""
-    ghi = tmp_path / "nhan.bin"
+    """Trợ giúp giả nói đúng giao thức (ghi số lần đăng nhập + khung từng lượt) + ffmpeg giả
+    (mỗi 2048 byte PCM → một khung ADTS)."""
+    ghi = tmp_path / "nhan.txt"
     tro_giup = _tep(tmp_path / "hik_noi", f"""
 import os, struct, sys
-bao = os.fdopen(int(os.environ["HIK_BAO_FD"]), "w")
+bao = os.fdopen(int(os.environ["HIK_BAO_FD"]), "w", buffering=1)
 if os.environ.get("HIK_MK") == "sai":
     bao.write("LOI đăng nhập cổng 8000 không được (mã 1)\\n"); sys.exit(3)
-bao.write("OK AAC 16000\\n"); bao.flush()
-khung = []
-while True:
-    d = sys.stdin.buffer.read(4)
-    if len(d) < 4: break
+nhat_ky = open({str(ghi)!r}, "a", buffering=1)
+nhat_ky.write("dang_nhap\\n")
+bao.write("SAN AAC 16000\\n")
+mo, n_khung = False, 0
+while len(d := sys.stdin.buffer.read(4)) == 4:
     n = struct.unpack(">I", d)[0]
-    if n == 0: break
-    khung.append(sys.stdin.buffer.read(n))
-open({str(ghi)!r}, "wb").write(b"".join(struct.pack(">I", len(k)) + k for k in khung))
+    if n == 0xFFFFFFFF:
+        mo, n_khung = True, 0; bao.write("OK\\n")
+    elif n == 0:
+        if mo: nhat_ky.write(f"luot {{n_khung}}\\n")
+        mo = False; bao.write("DONG\\n")
+    else:
+        k = sys.stdin.buffer.read(n)
+        assert k == {ADTS!r}
+        n_khung += 1
+nhat_ky.write("dang_xuat\\n")
 """)
     ffmpeg = _tep(tmp_path / "ffmpeg", f"""
 import sys
@@ -55,36 +63,71 @@ while d := sys.stdin.buffer.read(2048):
         yield ffmpeg, ghi
 
 
-def _khung(ghi: Path) -> list[bytes]:
-    du, ra = ghi.read_bytes(), []
-    while du:
-        n = struct.unpack(">I", du[:4])[0]
-        ra.append(du[4:4 + n])
-        du = du[4 + n:]
-    return ra
+def _nhat_ky(ghi: Path) -> list[str]:
+    return ghi.read_text().split("\n")[:-1] if ghi.exists() else []
 
 
-def test_phien_gui_khung_adts_dung_giao_thuc_va_giu_nhip(gia):
+def test_luot_noi_gui_khung_adts_dung_giao_thuc_va_giu_nhip(gia):
     ffmpeg, ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
     t0 = time.monotonic()
-    with hik_talk.HikTalkSession("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg) as s:
+    with mo() as s:
         assert (s.ma, s.tan_so) == ("AAC", 16000)
         s.send_pcm(b"\x00\x01" * 16000)                   # 1 giây ở 16 kHz = 32 000 byte
     assert time.monotonic() - t0 >= 0.8                   # trả về gần lúc tiếng dứt
     # 32 000 byte / 2048 = 15 khung trọn + 1 khung phần dư cuối (ffmpeg giả nhả mọi lần đọc)
-    assert _khung(ghi) == [ADTS] * 16
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 16"]
+    mo.close()
+    assert _nhat_ky(ghi)[-1] == "dang_xuat"
+
+
+def test_giu_dang_nhap_giua_cac_luot_noi(gia):
+    """Đo 29/09/2026: đăng nhập H6C 0,6–1,3 s, mở kênh 0,02–0,27 s — lượt sau không đăng nhập lại."""
+    ffmpeg, ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    for _ in range(3):
+        with mo() as s:
+            s.send_pcm(b"\x00\x01" * 2048)
+    mo.close()
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 2", "luot 2", "luot 2", "dang_xuat"]
+
+
+def test_ban_tro_giup_chet_thi_dang_nhap_lai_mot_lan(gia):
+    ffmpeg, ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    mo._tg.p.kill()                                       # camera khởi động lại / tiến trình chết
+    mo._tg.p.wait()
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    mo.close()
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 2", "dang_nhap", "luot 2", "dang_xuat"]
+
+
+def test_sap_toi_luc_tu_thoat_vi_ngoi_yen_thi_dung_ban_moi(gia):
+    ffmpeg, ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    mo._tg.ranh_tu -= hik_talk.NGHI_GIAY                # đã ngồi yên quá lâu
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    mo.close()
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 2", "dang_xuat", "dang_nhap", "luot 2", "dang_xuat"]
 
 
 def test_sai_mat_khau_bao_loi_dang_nhap(gia):
     ffmpeg, _ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "sai", sdk_dir="/x", ffmpeg=ffmpeg)
     with pytest.raises(AuthError):
-        hik_talk.HikTalkSession("10.0.0.9", "admin", "sai", sdk_dir="/x", ffmpeg=ffmpeg).__enter__()
+        mo().__enter__()
 
 
 def test_kiem_luc_them_camera_khong_gui_tieng(gia):
     _ffmpeg, ghi = gia
     assert hik_talk.check_hik_talk("10.0.0.9", "admin", "MA", "/x") == "AAC"
-    assert _khung(ghi) == []
+    assert _nhat_ky(ghi) == ["dang_nhap", "luot 0", "dang_xuat"]
 
 
 def test_mo_phien_nho_tan_so_camera_bao(gia):
@@ -94,6 +137,7 @@ def test_mo_phien_nho_tan_so_camera_bao(gia):
     with mo() as s:
         assert s.tan_so == 16000
     assert mo.tan_so == 16000
+    mo.close()
 
 
 def test_khong_co_ban_tro_giup_cho_may_nay_thi_bao_ro():
