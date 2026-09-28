@@ -409,3 +409,66 @@ async def test_tts_treo_khong_lam_ve_tinh_ket(hass):
             mock.patch.object(ve_tinh, "tts_response_finished", lambda: xong.append(1)):
         await ve_tinh._phat_tts(LuongTreo())
     assert xong == [1] and not ve_tinh._dang_noi and ve_tinh._tts_xong.is_set()
+
+
+async def test_tra_loi_khong_lay_duoc_luong_tieng_van_ve_cho(hass):
+    """Sự cố thật 27/09/2026 21:35: câu trả lời có TTS nhưng không lấy được luồng tiếng
+    (``tts.async_get_stream`` trả None) → vệ tinh kẹt «Đang phản hồi» 18 giờ, vì chỉ
+    ``_phat_tts`` báo ``tts_response_finished``. Mọi lượt phải kết thúc bằng trạng thái chờ."""
+    muc = _muc(mic="http://mic")
+    lan = []
+
+    async def accept_co_tts(self, audio_stream, start_stage=PipelineStage.STT, **_kw):
+        lan.append(start_stage)
+        if len(lan) == 1:
+            for loai, du_lieu in ((PipelineEventType.TTS_START, {}),
+                                  (PipelineEventType.TTS_END, {"tts_output": {"token": "khong-co.wav"}}),
+                                  (PipelineEventType.RUN_END, {})):
+                self._internal_on_pipeline_event(PipelineEvent(loai, du_lieu))
+        else:
+            await asyncio.Event().wait()
+
+    async def mic_gia(self):
+        await asyncio.Event().wait()
+
+    from custom_components.dahua_talk import assist_satellite as sat
+    with mock.patch.object(sat.DahuaTalkSatellite, "async_accept_pipeline_from_satellite", accept_co_tts), \
+            mock.patch.object(sat.DahuaTalkSatellite, "_doc_mic", mic_gia), \
+            mock.patch.object(sat.tts, "async_get_stream", return_value=None):
+        await _nap(hass, muc)
+        for _ in range(300):
+            if len(lan) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        reg = er.async_get(hass)
+        ve_tinh = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+                       if e.domain == "assist_satellite")
+        trang_thai = hass.states.get(ve_tinh).state
+        await hass.config_entries.async_unload(muc.entry_id)
+    assert len(lan) >= 2
+    assert trang_thai == "idle", f"vệ tinh kẹt ở «{trang_thai}» sau lượt có TTS"
+
+
+async def test_thong_bao_url_treo_thi_co_han_va_mic_nghe_lai(hass):
+    """Phát thông báo bằng URL KHÔNG có hạn: loa treo là ``_dang_noi`` bật mãi — mic bỏ mọi
+    tiếng, vệ tinh điếc mà không báo gì."""
+    from homeassistant.components.assist_satellite import AssistSatelliteAnnouncement
+
+    muc = _muc()
+    await _nap(hass, muc)
+    from custom_components.dahua_talk import assist_satellite as sat
+    reg = er.async_get(hass)
+    eid = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+               if e.domain == "assist_satellite")
+    ve_tinh = hass.data["entity_components"]["assist_satellite"].get_entity(eid)
+
+    async def treo(_url):
+        await asyncio.Event().wait()
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", treo), \
+            mock.patch.object(sat, "_THONG_BAO_TOI_DA", 0.2):
+        await ve_tinh.async_announce(AssistSatelliteAnnouncement(
+            message="a", media_id="http://x/a.mp3", original_media_id="http://x/a.mp3",
+            tts_token=None, media_id_source="url"))
+    assert ve_tinh._dang_noi is False
+    await hass.config_entries.async_unload(muc.entry_id)

@@ -47,6 +47,9 @@ _TTS_THEM_GIAY = 5.0
 #: Gom tiếng TTS / tiếng ting tối đa ngần này giây — quá thì bỏ, vệ tinh về nghe tiếp.
 _TTS_GOM_TOI_DA = 30.0
 _TING_TOI_DA = 5.0
+#: Phát thông báo bằng URL tối đa ngần này giây — loa treo thì bỏ, mic nghe lại. Không có hạn
+#: thì ``_dang_noi`` bật mãi: mic bỏ mọi tiếng, vệ tinh điếc mà không báo gì.
+_THONG_BAO_TOI_DA = 300.0
 #: Sau gói tiếng ting cuối, mic còn chặn ngần này giây: camera phát trễ sau lúc nhận + vang
 #: phòng. Đo thật 26/09/2026 22:53–22:55: KHÔNG chặn thì 0,3 s sau từ gọi bộ dò tiếng đã
 #: thấy "tiếng" (ting lọt mic / đuôi từ gọi), 1,5 s sau coi là nói xong — nhận giọng bịa
@@ -246,6 +249,13 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
                     self._loi_luot = str(exc) or type(exc).__name__
                 if self._co_tts and self._loi_luot is None:
                     await self._tts_xong.wait()
+                # Lượt kết thúc thì vệ tinh phải về chờ — MỘT chỗ cho mọi đường thoát. HA chỉ rời
+                # «Đang phản hồi» khi được báo ``tts_response_finished``; trước đây chỉ `_phat_tts`
+                # báo, nên lượt có TTS mà không lấy được luồng tiếng (hay lỗi giữa chừng) kẹt mãi —
+                # đo thật 27/09/2026 21:35: kẹt 18 giờ, chủ máy thấy «Đang phản hồi», không ting.
+                # So chuỗi: ``AssistSatelliteState`` là StrEnum, không xuất ra gói ở HA 2026.2.
+                if not self._dang_noi and self.state == "responding":
+                    self.tts_response_finished()
                 if self._tiep:
                     # Bị cắt để hỏi–đáp tiếp (start_conversation / câu hỏi lại):
                     # lượt sau phải nghe ngay, không nghỉ.
@@ -421,7 +431,8 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
                 async with asyncio.timeout(len(wav) / 16000 + _TTS_THEM_GIAY + 10):
                     await self._data.speaker.async_play_wav(wav)
             else:
-                await self._data.speaker.async_play_url(announcement.media_id)
+                async with asyncio.timeout(_THONG_BAO_TOI_DA):
+                    await self._data.speaker.async_play_url(announcement.media_id)
         except (TalkError, OSError, TimeoutError) as exc:
             _LOGGER.warning("%s: cannot play announcement: %s", self.entity_id, exc)
         finally:

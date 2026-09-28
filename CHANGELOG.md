@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.9 - 2026-09-28
+
+### Hết kẹt "Đang phản hồi" ở MỌI đường — vệ tinh luôn về chờ sau mỗi lượt
+- Sự cố thật: câu trả lời có TTS nhưng không lấy được luồng tiếng → vệ tinh kẹt "Đang phản
+  hồi" 18 giờ (không ting, gọi không nhận) tới khi nạp lại tích hợp. Home Assistant chỉ rời
+  trạng thái này khi được báo `tts_response_finished`, mà trước đây chỉ đường phát câu trả lời
+  báo. Nay vòng nghe tự báo khi lượt kết thúc và loa không còn phát — một chỗ cho mọi đường thoát.
+- Phát thông báo bằng URL có hạn (300 s): loa treo thì bỏ, mic nghe lại — trước đây mic bỏ mọi
+  tiếng tới khi loa trả lời, vệ tinh điếc mà không báo gì.
+
 ## 0.2.8 - 2026-09-26
 
 ### Tiếng ting không còn bị nghe thành câu lệnh
