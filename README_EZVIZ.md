@@ -1,222 +1,66 @@
-# EZVIZ (và Hikvision, camera ONVIF có loa) — loa, bộ đàm, vệ tinh Assist
+# EZVIZ / Hikvision / camera ONVIF có loa
 
-Tích hợp **Assist Camera** từ bản **0.2.0** nói được với camera **EZVIZ** qua **kênh
-tiếng ngược RTSP/ONVIF** — cùng các thực thể như camera Imou: loa (`tts.speak`), vệ tinh
-Assist, bộ đàm qua thẻ WebRTC. Chạy hoàn toàn trong mạng nhà, **không qua đám mây EZVIZ**,
-không cần tài khoản nhà phát triển EZVIZ.
+Cùng các thực thể như camera Imou (loa, vệ tinh Assist, bộ đàm), chạy trong mạng nhà, không
+qua đám mây EZVIZ. Phần chung (Assist, bộ đàm, 4G, bảo mật) ở [README chính](README.md).
 
-Hướng dẫn chung (SmartPSS, Assist, mở cổng 4G, go2rtc, bảo mật) ở [README chính](README.md);
-trang này chỉ ghi phần **khác** của EZVIZ.
+Tích hợp nói với camera theo một trong hai đường:
 
-> **Từ 0.4.0 — loa qua HCNetSDK (cổng 8000).** Có đời EZVIZ **không có** kênh tiếng ngược
-> (H6C: không ONVIF, cổng HTTP bị khoá), có đời **có mà loa câm** ([issue #1](https://github.com/TriTue2011/imou-homeassistant/issues/1)).
-> Cách chắc chạy: thư viện **HCNetSDK** của Hikvision nói qua cổng thiết bị **8000** — đo thật
-> trên H6C: camera báo AAC 16 kHz, `tts.speak` phát rõ. Xem [Loa qua HCNetSDK](#loa-qua-hcnetsdk-cổng-8000).
+| Đường | Khi nào |
+|---|---|
+| **HCNetSDK, cổng 8000** (AAC 16 kHz) | Có SDK trong `/config/hcnetsdk/lib` — **chắc chạy nhất** (vd EZVIZ H6C: không ONVIF, không kênh ngược RTSP) |
+| **Kênh tiếng ngược RTSP/ONVIF, cổng 554** | Không có SDK. Có đời EZVIZ có kênh ngược mà loa câm ([issue #1](https://github.com/TriTue2011/imou-homeassistant/issues/1)) |
 
-**Mục lục**
+## Cài HCNetSDK
 
-1. [Loa qua HCNetSDK (cổng 8000)](#loa-qua-hcnetsdk-cổng-8000)
-1. [Vì sao EZVIZ đi đường khác Imou](#vì-sao-ezviz-đi-đường-khác-imou)
-2. [Chuẩn bị camera](#chuẩn-bị-camera)
-3. [Thêm camera vào tích hợp](#thêm-camera-vào-tích-hợp)
-4. [go2rtc và bộ đàm](#go2rtc-và-bộ-đàm)
-5. [Thẻ WebRTC Camera](#thẻ-webrtc-camera)
-6. [Vệ tinh Assist](#vệ-tinh-assist)
-7. [Sự cố thường gặp](#sự-cố-thường-gặp)
-8. [Đã kiểm những gì](#đã-kiểm-những-gì)
+HA OS hoặc HA Container, máy **x86_64** (ARM chưa có).
 
----
+1. Tải [Device Network SDK (Linux 64-bit)](https://www.hikvision.com/en/support/tools/hitools/clf4633a00e385d6ea/)
+   của Hikvision (tích hợp không kèm vì bản quyền).
+2. Chép thư mục **`lib`** trong gói vào **`/config/hcnetsdk/lib`** (phải có
+   `/config/hcnetsdk/lib/libhcnetsdk.so`) — HA OS dùng add-on Samba / File editor / SSH.
+3. Thêm camera (dưới). Camera đã thêm trước đó: ⋮ → **Cấu hình lại** → lưu.
 
-## Loa qua HCNetSDK (cổng 8000)
-
-Chạy cả trên **HA OS** lẫn HA Container, máy **x86_64** (Raspberry Pi / ARM chưa có bản).
-
-1. **Tải SDK** (bản quyền Hikvision nên tích hợp không kèm): trang Hikvision →
-   [Device Network SDK (Linux 64-bit)](https://www.hikvision.com/en/support/tools/hitools/clf4633a00e385d6ea/)
-   → tệp dạng `EN-HCNetSDKV6.1.9.x_…_linux64.zip`.
-2. **Chép thư mục `lib`** trong gói đó vào thư mục cấu hình HA thành **`/config/hcnetsdk/lib`**
-   (phải có `/config/hcnetsdk/lib/libhcnetsdk.so`). HA OS: dùng add-on *Samba share* / *File
-   editor* / *SSH*; HA Container: chép vào thư mục đang gắn làm `/config`.
-3. **Thêm camera** (menu EZVIZ, như dưới). Có SDK thì tích hợp tự chọn đường cổng 8000 và
-   đăng nhập thử (mở rồi đóng kênh đàm thoại — không phát gì). Camera đã thêm từ trước: bấm
-   **Cấu hình lại** rồi lưu để chuyển sang đường này.
-
-Cách chạy: container HA là Alpine (musl) nên không nạp thẳng được HCNetSDK (dựng cho glibc).
-Tích hợp mang theo chương trình trợ giúp nhỏ `hik/hik_noi-x86_64` (mã nguồn `hik/hik_noi.c`)
-và bộ glibc đi kèm (`hik/glibc-x86_64`, giấy phép ở `hik/README.md`), chạy như tiến trình con;
-ffmpeg của HA mã hoá tiếng theo đúng mã camera đòi (AAC / G.711).
-
-Camera phải mở cổng **8000** trong mạng nhà (EZVIZ Studio → Remote Configuration → Network →
-General: *Device Port* 8000). Mic vẫn đi luồng RTSP như trước.
-
-## Vì sao EZVIZ đi đường khác Imou
-
-| | Imou / Dahua | EZVIZ |
-|---|---|---|
-| Đường nói ra loa | Giao thức riêng cổng **37777** | **Kênh tiếng ngược RTSP** (chuẩn ONVIF), cổng **554** |
-| ISAPI (API web của Hikvision) | — | **Thường không có** (đo trên camera thật: mọi `/ISAPI/…` trả 404) |
-| SDK của EZVIZ | — | Bắt đi qua đám mây (`appKey`, `accessToken`), tự lấy mic máy tính — **không dùng được** cho HA |
-
-Kênh tiếng ngược: khi được hỏi luồng RTSP kèm dấu hiệu ONVIF (`Require:
-www.onvif.org/ver20/backchannel`), camera trả thêm một **đường tiếng chiều camera nhận**
-(G.711 PCMU 8 kHz). Tích hợp mở đường đó rồi gửi tiếng — đúng cách go2rtc làm với camera
-có kênh ngược.
+Camera phải mở cổng **8000** trong mạng nhà (EZVIZ Studio → Network → *Device Port*).
 
 ## Chuẩn bị camera
 
-1. **IP tĩnh** (hoặc giữ chỗ DHCP trên router) cho camera.
-2. **Tài khoản:** `admin` + **mã xác minh** (6 chữ IN HOA trên tem dưới đáy camera / trong
-   hộp). Đổi mã xác minh trong app EZVIZ thì đổi luôn mật khẩu RTSP.
-3. **Mã hoá hình H.264** (app EZVIZ → cài đặt camera → Mã hoá / Video): trình duyệt xem
-   WebRTC H.265 rất kém.
-4. Một số đời EZVIZ phải **bật RTSP / xem qua mạng LAN** trong app mới mở cổng 554.
-5. **Sai mật khẩu vài lần là camera khoá đăng nhập** một lúc — tích hợp chỉ thử một lần mỗi
-   lần bấm.
+- **IP tĩnh**; mã hoá hình **H.264**; một số đời phải bật **RTSP / xem qua LAN** trong app.
+- Tài khoản `admin` + **mã xác minh** (6 chữ IN HOA trên tem dưới đáy camera).
+- Luồng chính `/Streaming/Channels/101`, luồng phụ `/Streaming/Channels/102`.
 
-**Đường dẫn luồng** (kiểu Hikvision): luồng chính `/Streaming/Channels/101`, luồng phụ
-`/Streaming/Channels/102`.
+## Thêm camera
 
-## Thêm camera vào tích hợp
+Thêm tích hợp → **Assist Camera** → loại **EZVIZ**: điền Tên, IP, **mã xác minh**; tick **Nghe
+mic camera** nếu dùng làm vệ tinh Assist (URL mic tự dựng). Tích hợp đăng nhập thử, không phát
+gì. Hikvision / ONVIF khác thì chọn loại **Hikvision / camera ONVIF khác**.
 
-Cài đặt → Thiết bị & dịch vụ → **Thêm tích hợp** → **Assist Camera** → chọn loại
-**EZVIZ**. Chỉ phải điền:
-
-| Ô | Điền |
-|---|---|
-| Tên | vd `Cam EZVIZ` |
-| IP camera | IP trong mạng nhà |
-| Mật khẩu | **mã xác minh** 6 chữ IN HOA trên tem dưới đáy camera (hoặc mật khẩu bạn đã đổi) |
-| Nghe mic camera | tick nếu dùng camera làm vệ tinh Assist / từ gọi — URL mic **tự dựng**, không phải gõ mật khẩu vào URL |
-| URL mic khác | để trống; chỉ điền khi muốn đọc mic qua nguồn khác (vd qua go2rtc) |
-
-Tài khoản `admin`, cổng `554`, luồng `/Streaming/Channels/101` tích hợp tự điền. Camera
-Hikvision / ONVIF khác (đường dẫn luồng khác) thì chọn loại **Hikvision / camera ONVIF
-khác** — có đủ ô cổng, đường dẫn, tài khoản.
-
-Lúc bấm gửi, tích hợp **chỉ hỏi** camera có kênh ngược không (không phát tiếng):
-
-- báo **"không có kênh tiếng ngược"** → camera không có loa, hoặc sai đường dẫn luồng;
-- báo **sai đăng nhập** → kiểm lại mã xác minh (và chờ vài phút nếu vừa sai nhiều lần).
-
-Thử loa:
-
-```yaml
-action: tts.speak
-target: {entity_id: tts.piper}          # engine TTS của bạn
-data:
-  media_player_entity_id: media_player.cam_ezviz_speaker
-  message: "Thử loa camera"
-```
-
-Sửa IP, mật khẩu, đường dẫn sau khi thêm: ⋮ cạnh camera → **Cấu hình lại** (khoá bộ đàm
-giữ nguyên).
+Mic EZVIZ nhỏ (phòng yên ~ −70 dBFS): đặt `number.<camera>_microphone_gain` khoảng **+18 dB**.
 
 ## go2rtc và bộ đàm
-
-Mật khẩu có `@` thì trong URL phải viết `%40` (vd `Abc@123` → `Abc%40123`).
-
-**Cách A — chỉ cần bộ đàm, đơn giản nhất:** go2rtc tự dùng kênh ngược của RTSP, không
-cần dòng `exec`. Lưu ý: thêm **bất kỳ** tuỳ chọn `#…` nào vào URL RTSP (vd `#timeout=30`)
-là go2rtc **tắt** kênh ngược, trừ khi kèm `#backchannel=1` (đọc từ mã go2rtc
-`internal/rtsp/rtsp.go`):
-
-```yaml
-streams:
-  cam_ezviz:
-    - rtsp://admin:MA_XAC_MINH@192.168.1.64:554/Streaming/Channels/101
-    - ffmpeg:cam_ezviz#audio=opus          # tiếng camera cho WebRTC (AAC không qua WebRTC được)
-  cam_ezviz_sub:
-    - rtsp://admin:MA_XAC_MINH@192.168.1.64:554/Streaming/Channels/102
-```
-
-**Cách B — có dùng loa / Assist của tích hợp (khuyên dùng khi đó):** bộ đàm đi qua tích hợp
-như camera Imou, để **dùng chung một phiên nói** với `tts.speak`, thông báo và câu trả lời
-Assist (cái nào tới trước phát trước), và chỉ mở loa khi có tiếng người. Tắt kênh ngược
-riêng của go2rtc (`#backchannel=0`) — hai bên cùng mở kênh ngược thì camera chỉ nhận một:
 
 ```yaml
 streams:
   cam_ezviz:
     - rtsp://admin:MA_XAC_MINH@192.168.1.64:554/Streaming/Channels/101#backchannel=0
     - ffmpeg:cam_ezviz#audio=opus
-    - "rtsp://127.0.0.1:8557/<mã>/<khoá>#backchannel=1"   # dòng từ dahua_talk.get_intercom_source
+    - "rtsp://127.0.0.1:8557/<mã>/<khoá>#backchannel=1"   # từ dahua_talk.get_intercom_source
+  cam_ezviz_sub:
+    - rtsp://admin:MA_XAC_MINH@192.168.1.64:554/Streaming/Channels/102
 ```
 
-Lấy dòng bộ đàm và chọn `ha_url`: [README chính → Bộ đàm](README.md#bộ-đàm) (y hệt Imou). Từ
-0.5.0 dòng này là `rtsp://…:8557` — tiếng điện thoại tới loa ở **16 kHz** (bản cũ: dòng
-`exec:` 8 kHz).
-
-**Camera nói qua HCNetSDK (cổng 8000, vd H6C) — nghỉ giữa câu thì câu sau trễ ~1,2 giây.**
-Đo trên H6C: kênh nói vừa đóng thì camera cần ~1,24 giây mới cho mở lại (mở bằng phiên
-đăng nhập khác cũng thế), và mic camera **câm suốt lúc kênh mở** kể cả khi không gửi
-tiếng — nên bộ đàm vẫn phải đóng kênh sau 1,5 giây im để nghe được bên kia. Nghỉ 1,5–3,5
-giây giữa hai câu là câu sau phải chờ camera nhả kênh. Nói liền một mạch: trễ ~0,1–0,4
-giây. Từ 0.4.1–0.5.0 tích hợp giữ sẵn đăng nhập (mở kênh 26–37 ms thay vì ~0,6 s), chờ
-camera nhả kênh thay vì bỏ mất câu ("alo, alo"), và bỏ bớt khoảng lặng để không tích trễ.
-
-Xem / nói từ xa qua 4G: [README chính → Xem và nói từ xa](README.md#xem-và-nói-từ-xa-4g)
-(mở cổng 8555/TCP, máy go2rtc không đi VPN, mạng `172.16–31.x.x` thì thêm `filters: ips`).
-
-## Thẻ WebRTC Camera
-
-```yaml
-type: custom:webrtc-camera
-ui: true
-streams:
-  - url: cam_ezviz
-    name: 🔇
-    media: video,audio
-  - url: cam_ezviz            # CÙNG camera — đừng trỏ sang luồng camera khác
-    name: 🎙️
-    media: video,audio,microphone
-style: |
-  .screenshot, .pictureinpicture { display: none !important; }
-  .controls ha-icon { --mdc-icon-size: 20px; }
-  .stream { font-size: 18px !important; margin-left: 6px !important; }
-```
-
-Bấm 🔇 ↔ 🎙️ để tắt/mở mic. Mic chỉ chạy khi HA mở bằng **https**.
-
-## Vệ tinh Assist
-
-Như camera Imou ([README chính → Vệ tinh Assist](README.md#vệ-tinh-assist-từ-gọi-tăng-mic)).
-Chỉ cần **tick "Nghe mic camera"** (khi thêm, hoặc ⋮ → Cấu hình lại): tích hợp tự dựng URL
-luồng phụ `rtsp://admin:…@IP:554/Streaming/Channels/102` (AAC 16 kHz), mã hoá sẵn ký tự
-đặc biệt trong mật khẩu (`@` → `%40`), đổi mật khẩu thì URL đổi theo.
-
-Muốn đọc mic qua go2rtc (đỡ một kết nối tới camera) thì điền ô **URL mic khác**:
-`http://IP_GO2RTC:1984/api/stream.mp4?src=cam_ezviz_sub&video=none&audio=all` — ô này thắng
-URL tự dựng.
-
-Đo trên camera EZVIZ thật: phòng yên chỉ khoảng **−70 dBFS** — đặt
-`number.<camera>_microphone_gain` **+18 dB**. Camera **tự tắt mic lúc loa đang phát** (như
-Imou), nên vệ tinh không tự nghe lại câu trả lời của mình.
-
-Chỉ điền khi HA đã có pipeline đủ từ gọi + STT + TTS. Camera hướng ra ngoài: đừng cho nghe.
+- `#backchannel=0` ở luồng camera: để bộ đàm đi qua tích hợp (dùng chung phiên với TTS/Assist),
+  không để go2rtc tự mở kênh ngược của camera — hai bên cùng mở thì camera chỉ nhận một.
+- Mật khẩu có `@` thì viết `%40`.
+- Lấy dòng bộ đàm, `ha_url`, thẻ WebRTC: [README chính → Bộ đàm](README.md#bộ-đàm).
+- **HCNetSDK:** nghỉ giữa câu 1,5–3,5 giây thì câu sau trễ ~1,2 giây — camera cần chừng đó mới
+  mở lại kênh vừa đóng, và mic camera câm suốt lúc kênh mở nên không giữ kênh mở được.
 
 ## Sự cố thường gặp
 
-| Hiện tượng | Nguyên nhân | Cách xử lý |
-|---|---|---|
-| Thêm camera báo "không có kênh tiếng ngược" | Camera không có loa, sai đường dẫn luồng, hoặc firmware tắt kênh ngược | Thử `/Streaming/Channels/101`; camera không loa thì chỉ xem được |
-| Báo sai đăng nhập dù đúng mã | Camera đang khoá sau nhiều lần sai | Chờ vài phút, thử **một** lần |
-| Không nối được cổng 554 | RTSP chưa bật / IP sai | Bật RTSP / xem qua LAN trong app EZVIZ; kiểm IP |
-| Cách B: nói không ra loa, go2rtc báo lỗi kênh ngược | Quên `#backchannel=0` — go2rtc và tích hợp cùng mở kênh ngược | Thêm `#backchannel=0` vào URL RTSP |
-| WebRTC không có hình | Luồng H.265 | Đổi sang H.264 trong app EZVIZ |
-| Mật khẩu có `@` làm go2rtc báo sai địa chỉ | `@` trong URL | Viết `%40` |
-
-## Đã kiểm những gì
-
-Trên một camera EZVIZ thật (26/09/2026), từ một máy trong cùng mạng:
-
-- Cổng 80, 443, 554, 8000 mở; **ISAPI không có** (mọi `/ISAPI/…` → 404).
-- RTSP `/Streaming/Channels/101` hỏi kiểu ONVIF → có đường tiếng `sendonly` **PCMU 8 kHz**
-  (hỏi thường thì không có).
-- Mở kênh ngược, phát 0,8 giây tiếng bíp PCMU: DESCRIBE / SETUP / PLAY / TEARDOWN đều 200.
-- Hàm kiểm của tích hợp (`check_rtsp_talk`) nhận camera; sai mật khẩu báo đúng lỗi đăng nhập.
-
-- Phát câu TTS 5 giây bằng `RtspTalkSession` của tích hợp, cùng lúc ghi mic camera: mic
-  **tắt về gần 0 đúng khoảng 4,5–5 giây loa phát** (có tiếng bật/tắt loa hai đầu) — camera
-  tắt mic lúc nói, như Imou.
-
-**Chưa kiểm:** tai người nghe chất lượng tiếng ở loa.
+| Hiện tượng | Cách xử lý |
+|---|---|
+| Thêm camera báo "không có kênh tiếng ngược" | Cài HCNetSDK (trên); hoặc sai đường dẫn luồng |
+| Báo sai đăng nhập dù đúng mã | Camera đang khoá — chờ vài phút, thử **một** lần |
+| Nói không ra loa, go2rtc báo lỗi kênh ngược | Thiếu `#backchannel=0` ở URL RTSP của camera |
+| Không nối được cổng 554 / 8000 | Bật RTSP / xem qua LAN trong app EZVIZ; kiểm Device Port 8000 |
+| WebRTC không có hình | Đổi sang H.264 |
