@@ -78,10 +78,14 @@ async def async_dam_bao_sdk(hass: HomeAssistant) -> bool:
         async with async_get_clientsession(hass).get(url, timeout=120) as r:
             if r.status != 200:
                 raise SdkTaiLoi(f"HTTP {r.status}")
-            du_lieu = await r.content.read(_TOI_DA + 1)
-        if len(du_lieu) > _TOI_DA:
-            raise SdkTaiLoi("package too large")
-        await hass.async_add_executor_job(giai_nen, du_lieu, sha, sdk_dir)
+            # Đọc TỪNG KHÚC tới hết: ``content.read(n)`` chỉ trả phần đang có trong bộ đệm (gặp thật
+            # 29/09/2026 trên HA OS: nhận thiếu gói → "sha256 mismatch").
+            du_lieu = bytearray()
+            async for khoi in r.content.iter_chunked(1 << 16):
+                du_lieu += khoi
+                if len(du_lieu) > _TOI_DA:
+                    raise SdkTaiLoi("package too large")
+        await hass.async_add_executor_job(giai_nen, bytes(du_lieu), sha, sdk_dir)
     except (SdkTaiLoi, OSError, tarfile.TarError, TimeoutError) as exc:
         _LOGGER.warning("HCNetSDK download from %s failed: %s — EZVIZ uses the RTSP backchannel",
                         url, exc)

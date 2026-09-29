@@ -1,6 +1,7 @@
 """Tự tải HCNetSDK cho EZVIZ: kiểm sha256, chỉ giải thư mục ``lib/``, hỏng thì đi đường RTSP."""
 
 import hashlib
+import os
 import io
 import tarfile
 from pathlib import Path
@@ -76,3 +77,31 @@ async def test_may_khong_co_goi_hoac_tai_hong_thi_di_duong_rtsp(hass, aioclient_
                 mock.patch.object(sdk_tai, "kien_truc", return_value="x86_64"):
             assert await sdk_tai.async_dam_bao_sdk(hass) is False
     assert aioclient_mock.call_count == 1
+
+
+class _LuongTungKhuc:
+    """Như aiohttp thật: ``read(n)`` chỉ trả phần đang có trong bộ đệm, không chờ tải hết."""
+
+    def __init__(self, du_lieu: bytes, khuc: int = 1000):
+        self._khuc = [du_lieu[i:i + khuc] for i in range(0, len(du_lieu), khuc)]
+
+    async def read(self, n=-1):
+        return self._khuc[0]
+
+    async def iter_chunked(self, n):
+        for k in self._khuc:
+            yield k
+
+
+async def test_goi_ve_nhieu_khuc_van_du(hass, tmp_path):
+    goi = _goi({"lib/libhcnetsdk.so": os.urandom(20000)})           # không nén được: nhiều khúc
+    phan_hoi = mock.MagicMock(status=200, content=_LuongTungKhuc(goi))
+    phien = mock.MagicMock()
+    phien.get.return_value.__aenter__ = mock.AsyncMock(return_value=phan_hoi)
+    phien.get.return_value.__aexit__ = mock.AsyncMock(return_value=False)
+    with mock.patch.dict(sdk_tai.GOI, {"x86_64": ("https://example.test/sdk.tar.gz", _sha(goi))}, clear=True), \
+            mock.patch.object(sdk_tai, "async_get_clientsession", return_value=phien), \
+            mock.patch.object(sdk_tai, "kien_truc", return_value="x86_64"), \
+            mock.patch.object(hass.config, "path", side_effect=lambda *p: str(tmp_path.joinpath(*p))), \
+            mock.patch.object(sdk_tai, "sdk_san_sang", side_effect=lambda d: (Path(d) / "libhcnetsdk.so").is_file()):
+        assert await sdk_tai.async_dam_bao_sdk(hass) is True

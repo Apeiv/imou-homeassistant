@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 - 2026-09-29
+
+### Sửa: tự tải HCNetSDK báo "sha256 mismatch"
+- Bản 0.6.0 đọc gói bằng một lần `content.read(n)` — aiohttp chỉ trả phần đang có trong bộ đệm
+  (đo thật: 16 384 / 10 015 050 byte), nên mã kiểm lệch và gói bị bỏ. Nay đọc từng khúc tới hết.
+  Gặp thật trên HA OS 29/09/2026. Test mới giả đúng hành vi đọc từng phần của aiohttp.
+- Đã cài 0.6.0: cập nhật lên 0.6.1 rồi ⋮ → Cấu hình lại camera EZVIZ để tải lại.
+
 ## 0.6.0 - 2026-09-29
 
 ### EZVIZ: tự tải HCNetSDK
