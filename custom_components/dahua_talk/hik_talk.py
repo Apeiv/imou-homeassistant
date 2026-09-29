@@ -8,9 +8,9 @@ câm (issue #1). HCNetSDK qua cổng 8000 thì mở được kênh đàm thoại
 HCNetSDK là thư viện dựng cho glibc, còn container HA (cả HA OS) chạy Alpine (musl) — không nạp
 được trực tiếp. Tích hợp mang theo chương trình ``hik/hik_noi-<kiến trúc>`` (mã nguồn
 ``hik/hik_noi.c``) và bộ glibc nhỏ ``hik/glibc-<kiến trúc>``; chạy qua trình nạp glibc đi kèm
-(đã thử trong container HA Alpine: chạy được). Bản thân HCNetSDK KHÔNG đi kèm (bản quyền
-Hikvision): người dùng tải "Device Network SDK (Linux 64-bit)" và chép thư mục ``lib`` vào
-``/config/hcnetsdk/lib``.
+(đã thử trong container HA Alpine: chạy được). Bản thân HCNetSDK KHÔNG nằm trong repo này (bản
+quyền Hikvision): ``sdk_tai`` tự tải gói ``lib`` vào ``/config/hcnetsdk/lib`` từ repo riêng
+``TriTue2011/hcnetsdk-linux``, hoặc người dùng tự chép.
 
 Luồng: PCM16 ``tan_so`` → ffmpeg của HA mã hoá theo mã camera đòi (AAC ADTS / G.711) → khung
 → chương trình trợ giúp (giữ nhịp thời gian thực) → ``NET_DVR_VoiceComSendData``.

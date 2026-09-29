@@ -7,18 +7,19 @@ Tích hợp nói với camera theo một trong hai đường:
 
 | Đường | Khi nào |
 |---|---|
-| **HCNetSDK, cổng 8000** (AAC 16 kHz) | Có SDK trong `/config/hcnetsdk/lib` — **chắc chạy nhất** (vd EZVIZ H6C: không ONVIF, không kênh ngược RTSP) |
-| **Kênh tiếng ngược RTSP/ONVIF, cổng 554** | Không có SDK. Có đời EZVIZ có kênh ngược mà loa câm ([issue #1](https://github.com/TriTue2011/imou-homeassistant/issues/1)) |
+| **HCNetSDK, cổng 8000** (AAC 16 kHz) | Máy HA **x86_64** — tích hợp **tự tải SDK** khi thêm camera EZVIZ — **chắc chạy nhất** (vd EZVIZ H6C: không ONVIF, không kênh ngược RTSP) |
+| **Kênh tiếng ngược RTSP/ONVIF, cổng 554** | Máy chưa có SDK (vd Raspberry Pi). Nhiều đời EZVIZ không có kênh ngược — HA báo `DESCRIBE failed (551)` — hoặc có mà loa câm ([issue #1](https://github.com/TriTue2011/imou-homeassistant/issues/1)) |
 
-## Cài HCNetSDK
+## HCNetSDK
 
-HA OS hoặc HA Container, máy **x86_64** (ARM chưa có).
+Thêm camera EZVIZ (hoặc ⋮ → **Cấu hình lại** camera đã có) là tích hợp tự tải SDK Hikvision
+(~10 MB, từ [TriTue2011/hcnetsdk-linux](https://github.com/TriTue2011/hcnetsdk-linux)), kiểm mã
+sha256 rồi giải vào `/config/hcnetsdk/lib`. Tải hỏng thì dùng kênh ngược RTSP và ghi cảnh báo vào
+nhật ký.
 
-1. Tải [Device Network SDK (Linux 64-bit)](https://www.hikvision.com/en/support/tools/hitools/clf4633a00e385d6ea/)
-   của Hikvision (tích hợp không kèm vì bản quyền).
-2. Chép thư mục **`lib`** trong gói vào **`/config/hcnetsdk/lib`** (phải có
-   `/config/hcnetsdk/lib/libhcnetsdk.so`) — HA OS dùng add-on Samba / File editor / SSH.
-3. Thêm camera (dưới). Camera đã thêm trước đó: ⋮ → **Cấu hình lại** → lưu.
+Tự chép tay (máy không ra được Internet): tải [Device Network SDK (Linux 64-bit)](https://www.hikvision.com/en/support/tools/hitools/clf4633a00e385d6ea/)
+của Hikvision, chép thư mục **`lib`** (kể cả `HCNetSDKCom`) vào **`/config/hcnetsdk/lib`** — HA OS
+dùng add-on Samba / File editor / SSH — rồi ⋮ → **Cấu hình lại** → lưu.
 
 Camera phải mở cổng **8000** trong mạng nhà (EZVIZ Studio → Network → *Device Port*).
 
@@ -59,7 +60,7 @@ streams:
 
 | Hiện tượng | Cách xử lý |
 |---|---|
-| Thêm camera báo "không có kênh tiếng ngược" | Cài HCNetSDK (trên); hoặc sai đường dẫn luồng |
+| Thêm camera báo "không có kênh tiếng ngược", loa báo `DESCRIBE failed (551)` | Camera không có kênh ngược: cần HCNetSDK (máy x86_64 — ⋮ → Cấu hình lại để tải); hoặc sai đường dẫn luồng |
 | Báo sai đăng nhập dù đúng mã | Camera đang khoá — chờ vài phút, thử **một** lần |
 | Nói không ra loa, go2rtc báo lỗi kênh ngược | Thiếu `#backchannel=0` ở URL RTSP của camera |
 | Không nối được cổng 554 / 8000 | Bật RTSP / xem qua LAN trong app EZVIZ; kiểm Device Port 8000 |

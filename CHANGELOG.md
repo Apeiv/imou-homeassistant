@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-09-29
+
+### EZVIZ: tự tải HCNetSDK
+- Thêm camera EZVIZ hoặc ⋮ → Cấu hình lại: máy HA x86_64 chưa có SDK thì tích hợp tự tải gói
+  `lib` (~10 MB) từ repo riêng `TriTue2011/hcnetsdk-linux`, kiểm sha256 ghim sẵn, chỉ nhận mục
+  trong `lib/`, giải qua thư mục tạm rồi mới đổi tên. Tải hỏng → kênh ngược RTSP như trước.
+- Vì sao: đời EZVIZ không có kênh ngược RTSP báo `DESCRIBE failed (551)` mỗi lần phát (gặp thật
+  29/09/2026 trên HA OS); trang tải của Hikvision chặn tải tự động (HTTP 403).
+- Raspberry Pi (aarch64): chưa — cần bản trợ giúp `hik_noi-aarch64` và SDK ARM64.
+
 ## 0.5.0 - 2026-09-29
 
 ### Bộ đàm 16 kHz — tiếng điện thoại tới loa rõ như TTS

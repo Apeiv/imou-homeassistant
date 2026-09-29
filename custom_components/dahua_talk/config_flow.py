@@ -23,7 +23,8 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT, 
 from .const import (CONF_LOAI, CONF_MIC_URL, CONF_NGHE_MIC, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT,
                     DEFAULT_RTSP_PATH, DEFAULT_RTSP_PORT, DOMAIN, LOAI_EZVIZ, LOAI_IMOU,
                     HIK_SDK_DIR, LOAI_ONVIF, TALK_DAHUA, TALK_HIK, TALK_RTSP)
-from .hik_talk import check_hik_talk, sdk_san_sang
+from .hik_talk import check_hik_talk
+from .sdk_tai import async_dam_bao_sdk
 from .rtsp_talk import NoBackchannelError, check_rtsp_talk
 from .talk import AuthError, TalkError, check_login
 
@@ -145,9 +146,9 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = "cannot_connect"
         return not errors
 
-    def _co_hik(self) -> bool:
-        """Có HCNetSDK (người dùng chép vào /config/hcnetsdk/lib) + bản trợ giúp cho máy này."""
-        return sdk_san_sang(self.hass.config.path(HIK_SDK_DIR))
+    async def _co_hik(self, loai: str) -> bool:
+        """EZVIZ nói qua HCNetSDK được không — chưa có SDK thì tự tải (`sdk_tai`)."""
+        return loai == LOAI_EZVIZ and await async_dam_bao_sdk(self.hass)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(step_id="user", menu_options=[LOAI_IMOU, LOAI_EZVIZ, LOAI_ONVIF])
@@ -164,7 +165,7 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _them(self, loai: str, user_input: dict[str, Any] | None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            v = _day_du(loai, _tu_form(loai, user_input), self._co_hik())
+            v = _day_du(loai, _tu_form(loai, user_input), await self._co_hik(loai))
             await self.async_set_unique_id(f"{v[CONF_HOST]}:{v[CONF_PORT]}")
             self._abort_if_unique_id_configured()
             if (mic := _url_mic(v)) is None:
@@ -183,7 +184,7 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             moi = _day_du(loai, {**entry.data, **_tu_form(loai, user_input), CONF_PASSWORD:
                                  user_input.get(CONF_PASSWORD) or entry.data[CONF_PASSWORD]},
-                          self._co_hik())
+                          await self._co_hik(loai))
             uid = f"{moi[CONF_HOST]}:{moi[CONF_PORT]}"
             if uid != entry.unique_id:
                 await self.async_set_unique_id(uid)

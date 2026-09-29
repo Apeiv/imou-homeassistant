@@ -183,7 +183,7 @@ async def test_them_ezviz_co_sdk_thi_noi_qua_hik(hass):
     from homeassistant.data_entry_flow import FlowResultType
     from homeassistant.setup import async_setup_component
     assert await async_setup_component(hass, "homeassistant", {})
-    with mock.patch("custom_components.dahua_talk.config_flow.sdk_san_sang", return_value=True), \
+    with mock.patch("custom_components.dahua_talk.sdk_tai.sdk_san_sang", return_value=True), \
             mock.patch("custom_components.dahua_talk.config_flow.check_hik_talk",
                        return_value="AAC") as kiem, \
             mock.patch("custom_components.dahua_talk.async_setup_entry", return_value=True):
