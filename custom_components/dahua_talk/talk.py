@@ -178,7 +178,9 @@ class TalkSession:
         self.sub.sendall(_khung(_A1))
         self._trang_thai(True)
         for s in (self.ctrl, self.sub):
-            s.settimeout(None)
+            # KHÔNG ``settimeout(None)``: camera thôi nhận (đầy cửa sổ TCP) thì ``sendall`` chặn mãi, luồng
+            # phát kẹt và nút Stop chờ theo (chủ máy 30/09/2026: "phát một tẹo thì đơ, không stop được").
+            s.settimeout(self.timeout)
             self._luong.append(threading.Thread(target=self._xa, args=(s,), name="dahua-talk-rx",
                                                 daemon=True))
         self._luong.append(threading.Thread(target=self._giu, name="dahua-talk-keepalive",
@@ -196,11 +198,13 @@ class TalkSession:
                          f"ConnectionID:{self.connection_id}", "TalkMode:0"])
 
     def _xa(self, s: socket.socket) -> None:
-        try:
-            while not self._dung.is_set():
+        while not self._dung.is_set():
+            try:
                 doc_khung(s)
-        except (OSError, ConnectionError):
-            pass
+            except TimeoutError:
+                continue            # camera im một lúc là thường — chỉ để luồng này còn thấy cờ dừng
+            except (OSError, ConnectionError):
+                return
 
     def _giu(self) -> None:
         while not self._dung.wait(1.0):

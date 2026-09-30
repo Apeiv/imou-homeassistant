@@ -486,7 +486,7 @@ async def test_nhac_phat_nen_stop_duoc_bai_moi_thay_bai_cu(hass):
               if e.domain == "media_player")
     dang: dict[str, object] = {}
 
-    async def phat_mai(url, huy=None):          # một "bài" chỉ dứt khi bị dừng
+    async def phat_mai(url, huy=None, tu_giay=0.0):   # một "bài" chỉ dứt khi bị dừng
         dang[url] = huy
         while not huy.is_set():
             await asyncio.sleep(0.01)
@@ -518,7 +518,7 @@ async def test_thong_bao_van_cho_phat_xong(hass):
               if e.domain == "media_player")
     xong: list[str] = []
 
-    async def phat(url, huy=None):
+    async def phat(url, huy=None, tu_giay=0.0):
         await asyncio.sleep(0.05)
         xong.append(url)
         return 0.05
@@ -548,3 +548,75 @@ async def test_am_luong_tung_camera_va_nho_qua_khoi_dong_lai(hass):
                                    blocking=True)
     assert hass.states.get(mp).attributes["volume_level"] == 1.0 and loa.he_so == 2.0
     assert hass.states.get(mp).attributes["supported_features"] & 4    # VOLUME_SET
+
+
+async def test_tam_dung_phat_tiep_va_thong_bao_chen_ngang(hass):
+    """Chủ máy 30/09/2026: "khi phát tts thì dừng nhạc, xong tts phát tiếp"; "nút stop, play trên media cam phải
+    hoạt động bình thường" — Pause nhớ chỗ, Play phát tiếp từ đó; thông báo chen ngang rồi nhạc chạy tiếp."""
+    from types import SimpleNamespace
+
+    from custom_components.dahua_talk import media_player as mpmod
+
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    lan: list[tuple[str, float]] = []
+
+    async def phat(url, huy=None, tu_giay=0.0):
+        lan.append((url, tu_giay))
+        if url.endswith("tb.mp3"):
+            await asyncio.sleep(0.02)
+            return 0.02
+        while not huy.is_set():
+            await asyncio.sleep(0.01)
+        return 1.0
+
+    gio = [100.0]
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", phat), \
+            mock.patch.object(mpmod, "time", SimpleNamespace(monotonic=lambda: gio[0])):
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/nhac.mp3", "media_content_type": "music"}, blocking=True)
+        await asyncio.sleep(0.03)
+        assert hass.states.get(mp).attributes["supported_features"] & (1 | 16384) == 1 | 16384   # PAUSE | PLAY
+        gio[0] = 130.0
+        await hass.services.async_call("media_player", "media_pause", {"entity_id": mp}, blocking=True)
+        assert hass.states.get(mp).state == "paused"
+        await hass.services.async_call("media_player", "media_play", {"entity_id": mp}, blocking=True)
+        await asyncio.sleep(0.03)
+        assert hass.states.get(mp).state == "playing" and lan[-1] == ("http://x/nhac.mp3", 30.0)
+        gio[0] = 140.0
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/tb.mp3", "media_content_type": "music",
+            "announce": True}, blocking=True)
+        await asyncio.sleep(0.03)
+        assert lan[-2:] == [("http://x/tb.mp3", 0.0), ("http://x/nhac.mp3", 40.0)], "đọc xong phát tiếp đúng chỗ"
+        assert hass.states.get(mp).state == "playing"
+        await hass.services.async_call("media_player", "media_stop", {"entity_id": mp}, blocking=True)
+        assert hass.states.get(mp).state == "idle"
+        await hass.services.async_call("media_player", "media_play", {"entity_id": mp}, blocking=True)
+        assert hass.states.get(mp).state == "idle", "Stop là dừng hẳn — Play không phát lại bài đã dừng"
+
+
+async def test_stop_khong_treo_khi_luong_phat_ket(hass):
+    """Luồng phát kẹt (đo 30/09/2026 trên máy thật: loa «playing» 3 giờ) thì Stop vẫn trả về và loa về idle."""
+    from custom_components.dahua_talk import media_player as mpmod
+
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+
+    async def ket(url, huy=None, tu_giay=0.0):
+        await asyncio.sleep(3600)           # không nhìn cờ dừng
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", ket), \
+            mock.patch.object(mpmod, "_CHO_DUNG_GIAY", 0.1):
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/a.mp3", "media_content_type": "music"}, blocking=True)
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(hass.services.async_call("media_player", "media_stop", {"entity_id": mp},
+                                                        blocking=True), timeout=2)
+    assert hass.states.get(mp).state == "idle"

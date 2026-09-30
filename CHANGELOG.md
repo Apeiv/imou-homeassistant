@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 - 2026-09-30
+
+### Sửa: loa camera "phát một lúc thì đơ, không Stop được" (và YouTube không phát được sau đó)
+- Gặp thật 30/09/2026: loa Imou kẹt ở "playing" hơn 3 giờ. Soi trên máy: camera đã cắt kết nối cổng
+  8086, luồng gửi thoát LẶNG, không còn ai đọc đầu ra của bộ mã hoá AAC → ống đầy → mọi thứ đứng chờ
+  (`pipe_write`); Stop chờ theo mãi, và mọi lệnh phát sau đó (YouTube, TTS) cũng xếp hàng sau bài kẹt.
+- Nay: camera cắt giữa bài thì báo lỗi ngay, loa về "idle"; cổng 37777 cũng không còn chờ gửi vô hạn
+  (trước đặt `settimeout(None)`); Stop / Pause chờ tối đa 8 giây rồi huỷ — không bao giờ treo HA.
+- Test tái hiện: camera giả cắt kết nối giữa bài — mã cũ kẹt, mã mới báo lỗi trong vài giây.
+
+### Pause / Play, và thông báo chen ngang nhạc
+- Loa camera có **Pause** và **Play**: tạm dừng nhớ đã phát tới đâu, Play phát tiếp từ đó.
+- Thông báo / TTS (`tts.speak`, `announce`) tới lúc đang phát nhạc: nhạc tạm dừng, đọc xong phát tiếp
+  đúng chỗ. Stop là dừng hẳn.
+
+### Lưu ý: mic camera khi đang phát
+- Camera Dahua/Imou TỰ TẮT MIC trong lúc có phiên nói (chống hú) — đầu ghi / Frigate không thu tiếng
+  trong mấy giây đang đọc. Bản cũ kẹt phiên nói thì mic tắt suốt thời gian kẹt; nay phiên nói luôn đóng
+  khi hết tiếng hoặc khi camera cắt.
+
 ## 0.8.0 - 2026-09-30
 
 ### Âm lượng loa từng camera

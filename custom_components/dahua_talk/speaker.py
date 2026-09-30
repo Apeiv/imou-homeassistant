@@ -197,11 +197,13 @@ class Speaker:
                 proc.kill()
             await proc.wait()
 
-    async def async_play_url(self, url: str, huy: threading.Event | None = None) -> float:
-        """Phát một URL (media source đã phân giải, tệp, luồng HTTP…). ``huy``: xem `async_play_pcm`."""
+    async def async_play_url(self, url: str, huy: threading.Event | None = None, tu_giay: float = 0.0) -> float:
+        """Phát một URL (media source đã phân giải, tệp, luồng HTTP…) từ giây ``tu_giay`` (phát tiếp sau khi
+        tạm dừng / sau thông báo). ``huy``: xem `async_play_pcm`."""
         ts = self.tan_so
+        tua = ["-ss", f"{tu_giay:.2f}"] if tu_giay > 0 else []
         return await self.async_play_pcm(self._ffmpeg_pcm(
-            ts, ["-protocol_whitelist", "http,https,file,tcp,tls", "-i", url]), ts, huy=huy)
+            ts, ["-protocol_whitelist", "http,https,file,tcp,tls,crypto,hls", *tua, "-i", url]), ts, huy=huy)
 
     async def async_play_wav(self, data: bytes) -> float:
         """Phát một tệp WAV. Đúng sẵn PCM16 mono đúng tần số loa thì khỏi qua ffmpeg."""

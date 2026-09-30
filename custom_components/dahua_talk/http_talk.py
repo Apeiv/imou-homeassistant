@@ -104,6 +104,8 @@ class HttpTalkSession:
         self._luong: list[threading.Thread] = []
         self._t_dau: float | None = None
         self._da_ghi = 0.0
+        #: Lỗi luồng gửi (camera đóng kết nối…) — ``send_pcm`` ném ra thay vì kẹt.
+        self._loi: BaseException | None = None
 
     def __enter__(self) -> HttpTalkSession:
         try:
@@ -221,19 +223,26 @@ class HttpTalkSession:
                         time.sleep(cho)
                     self.s.sendall(khung_dhav(k, seq, tick + int(seq * 64), giay))
                     seq += 1
-        except (OSError, ValueError, AttributeError):
-            pass
+        except (OSError, ValueError, AttributeError) as exc:
+            # Camera đóng kết nối / gửi quá hạn. Trước đây thoát LẶNG: không ai đọc ffmpeg nữa, ống đầy,
+            # ffmpeg thôi nhận, ``send_pcm`` kẹt mãi ở ``stdin.write`` — loa «phát một tẹo thì đơ, không stop
+            # được» (chủ máy 30/09/2026). Nay ghi lỗi và tắt ffmpeg để ``send_pcm`` báo lỗi ngay.
+            self._loi = exc
+            if ff.poll() is None:
+                ff.kill()
 
     def send_pcm(self, pcm: bytes) -> None:
         """PCM16 LE mono 16 kHz. Trả về khi tiếng ấy sắp phát xong (đi trước thời gian thực
         tối đa ``_DI_TRUOC`` giây) — như ``TalkSession.send_pcm``."""
+        if self._loi is not None:
+            raise TalkError(f"camera stopped taking audio on port 8086 ({self._loi})")
         if self._t_dau is None:
             self._t_dau = time.monotonic()
         try:
             self._ff.stdin.write(pcm)
             self._ff.stdin.flush()
         except (BrokenPipeError, ValueError, AttributeError) as exc:
-            raise TalkError(f"audio encoder stopped ({exc})") from exc
+            raise TalkError(f"audio encoder stopped ({self._loi or exc})") from exc
         self._da_ghi += len(pcm) / (2 * TAN_SO_HTTP)
         cho = self._t_dau + self._da_ghi - _DI_TRUOC - time.monotonic()
         if cho > 0:

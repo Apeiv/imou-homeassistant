@@ -154,3 +154,51 @@ def test_cat_adts_giu_phan_do():
     k = bytes([0xFF, 0xF1, 0x50, 0x80, 0x01, 0x5F, 0xFC]) + b"x" * 3   # khung dài 10
     ra, con = http_talk.cat_adts(k + k + k[:4])
     assert ra == [k, k] and con == k[:4]
+
+
+class Camera8086DongGiuaChung(Camera8086Gia):
+    """Nhận vài khung tiếng rồi ĐÓNG kết nối (RST) — như camera tự cắt kênh nói giữa bài."""
+
+    def _nghe(self):
+        c, _ = self.ln.accept()
+        du = b""
+        try:
+            while b := c.recv(65536):
+                du += b
+                while b"\r\n\r\n" in du and not du.startswith(b"$"):
+                    dau, _, du = du.partition(b"\r\n\r\n")
+                    chu = dau.decode()
+                    m = [x for x in chu.split("\r\n") if x.startswith("Private-Length: ")]
+                    du = du[int(m[0].split(": ")[1]):] if m else du
+                    self.yeu_cau.append(chu)
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                if du.count(b"DHAV") >= 3:
+                    c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    c.close()
+                    return
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="cần ffmpeg")
+def test_camera_cat_ket_noi_giua_bai_thi_bao_loi_khong_ket():
+    """Chủ máy 30/09/2026: "phát âm thanh … được 1 tẹo thì đơ, không stop được" — loa kẹt «playing» 3 giờ. Bản
+    cũ: luồng gửi thoát LẶNG khi camera cắt, không ai đọc ffmpeg, ống đầy, ``send_pcm`` kẹt mãi ở stdin.write."""
+    cam = Camera8086DongGiuaChung()
+    loi: list[BaseException] = []
+
+    def phat():
+        try:
+            with http_talk.HttpTalkSession("127.0.0.1", "admin", "mk", port=cam.cong) as s:
+                for _ in range(20):                                  # 20 giây tiếng, từng giây một
+                    s.send_pcm(b"\x10\x00" * 16000)
+        except TalkError as exc:
+            loi.append(exc)
+
+    t = threading.Thread(target=phat, daemon=True)
+    t0 = time.monotonic()
+    t.start()
+    t.join(8)
+    assert not t.is_alive(), "send_pcm kẹt sau khi camera cắt kết nối"
+    assert loi and "8086" in str(loi[0]) and time.monotonic() - t0 < 8
+    cam.luong.join(2)

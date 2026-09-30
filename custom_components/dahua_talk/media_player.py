@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Any
 
 from homeassistant.components import media_source
@@ -34,6 +35,9 @@ from .talk import TalkError
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Nút Stop / Pause chờ luồng phát thoát tối đa ngần này giây rồi huỷ — không bao giờ treo.
+_CHO_DUNG_GIAY = 8.0
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry,
                             async_add_entities: AddConfigEntryEntitiesCallback) -> None:
@@ -46,6 +50,8 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
                                  | MediaPlayerEntityFeature.BROWSE_MEDIA
                                  | MediaPlayerEntityFeature.MEDIA_ANNOUNCE
                                  | MediaPlayerEntityFeature.STOP
+                                 | MediaPlayerEntityFeature.PAUSE
+                                 | MediaPlayerEntityFeature.PLAY
                                  | MediaPlayerEntityFeature.VOLUME_SET
                                  | MediaPlayerEntityFeature.VOLUME_STEP)
     #: 50% = tiếng gốc của camera (xem `speaker.HE_SO_TOI_DA`): camera mới thêm vẫn kêu như trước.
@@ -58,6 +64,12 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         #: Bài nhạc đang phát nền và cờ dừng của nó.
         self._bai: asyncio.Task | None = None
         self._huy: threading.Event | None = None
+        #: Bài đang phát / tạm dừng: URL, giây bắt đầu của lượt phát này, lúc lượt ấy bắt đầu (monotonic) —
+        #: để Pause rồi Play, hay thông báo chen ngang, phát TIẾP đúng chỗ (chủ máy 30/09/2026: "khi phát tts
+        #: thì dừng nhạc, xong tts phát tiếp"; "nút stop, play trên media cam phải hoạt động bình thường").
+        self._url: str | None = None
+        self._tu_giay = 0.0
+        self._bat_dau = 0.0
 
     async def async_play_media(self, media_type: MediaType | str, media_id: str,
                                **kwargs: Any) -> None:
@@ -66,36 +78,80 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
             media_id = play.url
         url = async_process_play_media_url(self.hass, media_id)
         if kwargs.get(ATTR_MEDIA_ANNOUNCE):
-            await self._phat(url, threading.Event())
+            # Thông báo / TTS chen ngang: tạm dừng nhạc (nhớ chỗ), đọc xong phát tiếp.
+            dang_phat = self._attr_state == MediaPlayerState.PLAYING and self._url is not None
+            if dang_phat:
+                await self.async_media_pause()
+            await self._phat(url, threading.Event(), thong_bao=True)
+            if dang_phat:
+                await self.async_media_play()
             return
         await self.async_media_stop()
+        self._bat_dau_bai(url, 0.0)
+
+    def _bat_dau_bai(self, url: str, tu_giay: float) -> None:
+        self._url, self._tu_giay, self._bat_dau = url, tu_giay, time.monotonic()
         self._huy = huy = threading.Event()
         self._bai = self.hass.async_create_background_task(
-            self._phat(url, huy), f"{self.entity_id} play_media")
+            self._phat(url, huy, tu_giay=tu_giay), f"{self.entity_id} play_media")
 
-    async def _phat(self, url: str, huy: threading.Event) -> None:
+    async def _phat(self, url: str, huy: threading.Event, *, tu_giay: float = 0.0,
+                    thong_bao: bool = False) -> None:
         self._attr_state = MediaPlayerState.PLAYING
         self.async_write_ha_state()
+        het_bai = False
         try:
-            await self._entry.runtime_data.speaker.async_play_url(url, huy)
+            await self._entry.runtime_data.speaker.async_play_url(url, huy, tu_giay)
+            het_bai = not huy.is_set()
         except (TalkError, OSError) as exc:
             _LOGGER.warning("%s: cannot play to camera speaker: %s", self.entity_id, exc)
+            het_bai = True
         finally:
-            if self._huy in (None, huy):    # bài mới đã thay thì để bài mới giữ trạng thái
+            if thong_bao:
                 self._attr_state = MediaPlayerState.IDLE
-                self.async_write_ha_state()
+            elif self._huy is huy and het_bai:     # bài tự hết (không phải bị dừng / thay)
+                self._attr_state = MediaPlayerState.IDLE
+                self._url = self._huy = self._bai = None
+            self.async_write_ha_state()
 
-    async def async_media_stop(self) -> None:
-        """Dừng bài nhạc đang phát nền (luồng gửi thoát sau khúc đang gửi, ffmpeg tắt)."""
+    async def _dung_bai(self) -> None:
+        """Dừng luồng phát nền. Không chờ vô hạn: luồng gửi thoát sau khúc đang gửi, và các phiên nói đều có
+        hạn thời gian mạng — quá ``_CHO_DUNG_GIAY`` thì huỷ task, nút Stop không bao giờ treo HA."""
         bai, huy = self._bai, self._huy
         if huy is not None:
             huy.set()
         if bai is not None and not bai.done():
-            await asyncio.wait({bai})
+            _xong, con = await asyncio.wait({bai}, timeout=_CHO_DUNG_GIAY)
+            if con:
+                _LOGGER.warning("%s: playback did not stop within %s s, cancelling", self.entity_id,
+                                _CHO_DUNG_GIAY)
+                bai.cancel()
         self._bai = self._huy = None
 
+    async def async_media_stop(self) -> None:
+        """Dừng hẳn bài đang phát (hay đang tạm dừng)."""
+        await self._dung_bai()
+        self._url = None
+        self._attr_state = MediaPlayerState.IDLE
+        self.async_write_ha_state()
+
+    async def async_media_pause(self) -> None:
+        """Tạm dừng: nhớ đã phát tới giây nào để Play phát tiếp."""
+        if self._url is None or self._attr_state != MediaPlayerState.PLAYING:
+            return
+        self._tu_giay += time.monotonic() - self._bat_dau
+        await self._dung_bai()
+        self._attr_state = MediaPlayerState.PAUSED
+        self.async_write_ha_state()
+
+    async def async_media_play(self) -> None:
+        """Phát tiếp bài đã tạm dừng từ chỗ dừng."""
+        if self._url is None or self._attr_state == MediaPlayerState.PLAYING:
+            return
+        self._bat_dau_bai(self._url, self._tu_giay)
+
     async def async_will_remove_from_hass(self) -> None:
-        await self.async_media_stop()
+        await self._dung_bai()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
