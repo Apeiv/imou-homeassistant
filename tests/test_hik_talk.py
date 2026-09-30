@@ -54,7 +54,11 @@ while len(d := sys.stdin.buffer.read(4)) == 4:
     else:
         k = sys.stdin.buffer.read(n)
         assert k == {ADTS!r}
+        if not mo:
+            continue                                     # khung lạc khi kênh đã đóng: bỏ (như hik_noi.c)
         n_khung += 1
+        if n_khung == int(os.environ.get("HIK_HONG_SAU", "0")):
+            bao.write("LOI gửi tiếng hỏng (mã 41)\\n"); mo = False
 nhat_ky.write("dang_xuat\\n")
 """)
     ffmpeg = _tep(tmp_path / "ffmpeg", f"""
@@ -201,3 +205,18 @@ def test_mo_phien_noi_chon_hik():
     mo = _mo_phien_noi({"host": "h", "port": 554, "username": "admin", "password": "p",
                         "talk_protocol": "hik"}, "ffmpeg", "/config/hcnetsdk/lib")
     assert isinstance(mo, hik_talk.MoPhienHik) and mo.sdk_dir == "/config/hcnetsdk/lib"
+
+
+def test_issue2_camera_rot_mang_giua_bai_thi_bao_loi_khong_gui_tiep(gia, monkeypatch):
+    """Issue #2 (30/09/2026): EZVIZ rớt mạng giữa bài mà loa «đang phát» thêm 44 phút — hik_noi bỏ qua kết quả gửi.
+    Nay chương trình trợ giúp báo «LOI …» giữa lượt và ``send_pcm`` ném ``TalkError`` ngay."""
+    ffmpeg, _ghi = gia
+    monkeypatch.setenv("HIK_HONG_SAU", "3")
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    t0 = time.monotonic()
+    with pytest.raises(TalkError, match="gửi tiếng hỏng"):
+        with mo() as s:
+            for _ in range(30):                           # 30 giây tiếng nếu không ai chặn
+                s.send_pcm(b"\x00\x01" * 16000)
+    assert time.monotonic() - t0 < 8
+    mo.close()

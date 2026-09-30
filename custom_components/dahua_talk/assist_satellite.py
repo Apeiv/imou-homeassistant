@@ -55,6 +55,9 @@ _THONG_BAO_TOI_DA = 300.0
 #: thấy "tiếng" (ting lọt mic / đuôi từ gọi), 1,5 s sau coi là nói xong — nhận giọng bịa
 #: ra "Không", "Chị" khi chủ máy chưa nói gì, còn câu thật sau đó bị bỏ.
 _TING_DEM = 0.4
+#: Chờ ffmpeg mic thoát sau kill / chờ vòng nghe dừng khi gỡ entity — quá thì bỏ qua, không treo (issue #4).
+_CHO_FFMPEG_THOAT = 5.0
+_CHO_GO_GIAY = 10.0
 #: Hai lượt pipeline cách nhau ít nhất ngần này giây, dù lượt trước kết thúc thế nào.
 _LUOT_TOI_THIEU = 1.0
 #: Pipeline lỗi (chưa có từ gọi, STT/TTS hỏng…) thì nghỉ, tăng dần tới mức này.
@@ -179,9 +182,17 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
     async def async_will_remove_from_hass(self) -> None:
         if self._vong is not None:
             self._vong.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._vong
+            # Có hạn (issue #4): nạp lại mục kẹt ở unload_in_progress khi vòng nghe không thoát.
+            _xong, con = await asyncio.wait({self._vong}, timeout=_CHO_GO_GIAY)
+            if con:
+                _LOGGER.warning("%s: listen loop did not stop within %.0f s", self.entity_id, _CHO_GO_GIAY)
         await super().async_will_remove_from_hass()
+
+    def _loa_con_vang(self) -> bool:
+        """Loa của CHÍNH camera này đang phát, hoặc vừa dứt chưa quá ``che_mic_giay`` — bỏ tiếng mic. Nguồn là trạng
+        thái loa, nên che cả khi phát qua media_player (tts.speak, nhạc), không chỉ lúc vệ tinh tự trả lời (issue #3)."""
+        loa = self._data.speaker
+        return loa.playing or time.monotonic() < loa.het_tieng + self._data.che_mic_giay
 
     @callback
     def _khi_tat_mic(self, tat: bool) -> None:
@@ -323,6 +334,7 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
         proc = self._mic_proc = await asyncio.create_subprocess_exec(
             *lenh, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL)
+        _LOGGER.debug("%s: mic reader started (ffmpeg pid %s)", self.entity_id, getattr(proc, "pid", None))
         try:
             while True:
                 try:
@@ -331,7 +343,7 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
                     _LOGGER.warning("%s: no audio from mic for %.0f s, reopening",
                                     self.entity_id, _MIC_IM_GIAY)
                     break
-                if self._dang_noi or self._chan_ting or self._data.mic_muted:
+                if self._dang_noi or self._chan_ting or self._data.mic_muted or self._loa_con_vang():
                     continue
                 if self._hang.full():
                     self._hang.get_nowait()      # tụt hậu thì bỏ khúc cũ nhất
@@ -342,7 +354,14 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
         finally:
             if proc.returncode is None:
                 proc.kill()
-            await proc.wait()
+            # Có hạn: issue #4 (29/09/2026) — sau «no audio from mic … reopening» vệ tinh điếc hẳn, không còn ffmpeg,
+            # không log; `Process.wait()` chỉ xong khi mọi pipe đóng. Chờ mãi ở đây là vòng đọc mic chết lặng.
+            try:
+                async with asyncio.timeout(_CHO_FFMPEG_THOAT):
+                    await proc.wait()
+            except TimeoutError:
+                _LOGGER.warning("%s: mic ffmpeg did not exit %.0f s after kill, reopening anyway",
+                                self.entity_id, _CHO_FFMPEG_THOAT)
         # Tự tắt để đổi mức tăng mic thì mở lại ngay; đứt / đứng thật thì nghỉ 2 giây.
         if self._mo_lai_mic:
             self._mo_lai_mic = False
@@ -418,7 +437,7 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
             async with asyncio.timeout(len(wav) / 16000 + _TTS_THEM_GIAY + 10):
                 await self._data.speaker.async_play_wav(wav)
         except (TalkError, OSError, TimeoutError) as exc:
-            _LOGGER.warning("%s: cannot play reply: %s", self.entity_id, exc)
+            _LOGGER.warning("%s: cannot play reply: %r", self.entity_id, exc)
         finally:
             self._dang_noi = False
             self.tts_response_finished()
@@ -437,7 +456,7 @@ class DahuaTalkSatellite(DahuaTalkEntity, AssistSatelliteEntity):
                 async with asyncio.timeout(_THONG_BAO_TOI_DA):
                     await self._data.speaker.async_play_url(announcement.media_id)
         except (TalkError, OSError, TimeoutError) as exc:
-            _LOGGER.warning("%s: cannot play announcement: %s", self.entity_id, exc)
+            _LOGGER.warning("%s: cannot play announcement: %r", self.entity_id, exc)
         finally:
             self._dang_noi = False
 

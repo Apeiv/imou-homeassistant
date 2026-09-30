@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.number import NumberMode, RestoreNumber
-from homeassistant.const import EntityCategory, UnitOfSoundPressure
+from homeassistant.const import EntityCategory, UnitOfSoundPressure, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -14,7 +14,7 @@ from .entity import DahuaTalkEntity
 
 async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry,
                             async_add_entities: AddConfigEntryEntitiesCallback) -> None:
-    async_add_entities([DahuaTalkMicGain(entry)])
+    async_add_entities([DahuaTalkMicGain(entry), DahuaTalkMuteAfterSpeaking(entry)])
 
 
 class DahuaTalkMicGain(DahuaTalkEntity, RestoreNumber):
@@ -42,4 +42,34 @@ class DahuaTalkMicGain(DahuaTalkEntity, RestoreNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         self._entry.runtime_data.set_mic_gain(float(value))
+        self.async_write_ha_state()
+
+
+class DahuaTalkMuteAfterSpeaking(DahuaTalkEntity, RestoreNumber):
+    """Giây che mic vệ tinh sau khi loa nói xong (issue #3: đuôi câu trả lời lọt vào mic, vệ tinh tự đánh thức)."""
+
+    _attr_translation_key = "mute_after_speaking"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_native_min_value = 0
+    _attr_native_max_value = 5
+    _attr_native_step = 0.1
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, entry: DahuaTalkConfigEntry) -> None:
+        super().__init__(entry)
+        self._attr_unique_id = f"{entry.entry_id}-mute_after_speaking"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        cu = await self.async_get_last_number_data()
+        if cu is not None and cu.native_value is not None:
+            self._entry.runtime_data.che_mic_giay = float(cu.native_value)
+
+    @property
+    def native_value(self) -> float:
+        return self._entry.runtime_data.che_mic_giay
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._entry.runtime_data.che_mic_giay = float(value)
         self.async_write_ha_state()

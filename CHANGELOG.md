@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.3 - 2026-10-01
+
+### EZVIZ (HCNetSDK): camera rớt mạng giữa bài không còn "đang phát" vào kết nối chết (issue #2)
+- `hik_noi` kiểm kết quả `NET_DVR_VoiceComSendData` và nghe ngoại lệ `EXCEPTION_AUDIOEXCHANGE`
+  (`NET_DVR_SetExceptionCallBack_V30`); hỏng thì báo `LOI` giữa lượt, đóng kênh nói, vẫn giữ đăng nhập.
+- Phía HA đọc kênh báo không chặn khi gửi tiếng — thấy `LOI` thì dừng lượt (tự nối lại của 0.9.1 chạy được cho
+  EZVIZ); luồng chuyển khung hỏng thì báo lỗi và tắt ffmpeg thay vì kẹt; chương trình trợ giúp tự thoát được thu
+  dọn ngay (hết tiến trình `<defunct>`). `hik_noi-x86_64` dựng lại (glibc ≥ 2.34).
+
+### Vệ tinh không tự đánh thức bằng đuôi câu trả lời của chính nó (issue #3)
+- Mic vệ tinh bị bỏ khi loa CỦA CHÍNH camera đang phát và thêm một khoảng sau gói tiếng cuối — theo trạng thái
+  loa, nên che cả khi phát qua `media_player` (`tts.speak`, nhạc).
+- Ô số mới **Che mic sau khi nói** (giây, từng camera). Mặc định: HCNetSDK/EZVIZ 1,8 s, đường khác 0,5 s.
+
+### Vệ tinh không còn điếc lặng / nạp lại không còn treo (issue #4)
+- Chờ ffmpeg mic thoát sau khi tắt có hạn (5 s) — quá hạn thì ghi log và mở lại mic.
+- Gỡ vệ tinh chờ vòng nghe tối đa 10 s; `Speaker.async_close` chờ khoá tối đa 10 s.
+- Log lỗi dùng `repr` (không còn dòng `cannot play reply: ` trống); log debug mỗi lần mở mic.
+
 ## 0.9.2 - 2026-09-30
 
 ### Sửa: thanh tua hiện mà đứng yên

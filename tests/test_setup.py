@@ -30,7 +30,7 @@ async def test_du_thuc_the_cua_mot_camera(hass):
     await _nap(hass, muc)
     reg = er.async_get(hass)
     loai = sorted(e.entity_id.split(".")[0] for e in er.async_entries_for_config_entry(reg, muc.entry_id))
-    assert loai == ["assist_satellite", "media_player", "number", "select", "select", "switch", "switch"]
+    assert loai == ["assist_satellite", "media_player", "number", "number", "select", "select", "switch", "switch"]
 
 
 async def test_loa_phat_url_va_tat_mic(hass):
@@ -693,3 +693,79 @@ async def test_bao_vi_tri_va_tua(hass):
         assert lan == [0.0, 95.0] and hass.states.get(mp).attributes["media_position"] == 95
         await hass.services.async_call("media_player", "media_stop", {"entity_id": mp}, blocking=True)
         assert "media_position" not in hass.states.get(mp).attributes
+
+
+async def test_issue4_ffmpeg_khong_thoat_van_mo_lai_mic(hass, caplog):
+    """Issue #4 (29/09/2026): sau «no audio from mic … reopening» vệ tinh điếc hẳn, không còn ffmpeg, không log — chờ
+    `proc.wait()` vô hạn. Nay chờ có hạn: ffmpeg không thoát vẫn ghi log và mở lại mic."""
+    muc = _muc(mic="http://mic")
+    lenh_da_chay: list[list[str]] = []
+
+    class ProcKhongThoat:
+        def __init__(self):
+            self.returncode = None
+            self.stdout = self
+
+        async def readexactly(self, n):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            pass                                          # bị kill mà pipe không đóng
+
+        async def wait(self):
+            await asyncio.Event().wait()                  # không bao giờ xong
+
+    that = asyncio.create_subprocess_exec
+
+    async def exec_gia(*lenh, **kw):
+        if "-af" not in lenh:
+            return await that(*lenh, **kw)
+        lenh_da_chay.append(list(lenh))
+        return ProcKhongThoat()
+
+    async def accept_gia(self, audio_stream, **_kw):
+        await asyncio.Event().wait()
+
+    from custom_components.dahua_talk import assist_satellite as sat
+    with mock.patch.object(sat.asyncio, "create_subprocess_exec", exec_gia), \
+            mock.patch.object(sat, "_MIC_IM_GIAY", 0.05), mock.patch.object(sat, "_CHO_FFMPEG_THOAT", 0.05), \
+            mock.patch.object(sat, "_CHO_GO_GIAY", 0.5), \
+            mock.patch.object(sat.asyncio, "sleep", _ngu_nhanh(asyncio.sleep)), \
+            mock.patch.object(sat.DahuaTalkSatellite, "async_accept_pipeline_from_satellite", accept_gia):
+        await _nap(hass, muc)
+        for _ in range(300):
+            if len(lenh_da_chay) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.wait_for(hass.config_entries.async_unload(muc.entry_id), 10)
+    assert len(lenh_da_chay) >= 2, "ffmpeg không thoát vẫn phải mở lại mic"
+    assert "did not exit" in caplog.text
+
+
+async def test_issue3_che_mic_theo_trang_thai_loa(hass):
+    """Issue #3: đuôi câu trả lời lọt vào mic vì mic mở lại trước khi loa phát xong; phát qua media_player thì mic
+    không được che chút nào. Nay mic bị bỏ khi loa đang phát và thêm `che_mic_giay` sau gói tiếng cuối."""
+    import time as _t
+
+    from custom_components.dahua_talk import che_mic_mac_dinh
+    from custom_components.dahua_talk.const import CONF_TALK, TALK_HIK
+
+    assert che_mic_mac_dinh({CONF_TALK: TALK_HIK}) == 1.8 and che_mic_mac_dinh({}) == 0.5
+    muc = _muc(mic="http://mic")
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    sat_id = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+                  if e.domain == "assist_satellite")
+    so = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.unique_id.endswith("-mute_after_speaking"))
+    ve_tinh = hass.data["entity_components"]["assist_satellite"].get_entity(sat_id)
+    loa, d = muc.runtime_data.speaker, muc.runtime_data
+    await hass.services.async_call("number", "set_value", {"entity_id": so, "value": 1.5}, blocking=True)
+    assert d.che_mic_giay == 1.5
+    loa.playing, loa.het_tieng = True, 0.0
+    assert ve_tinh._loa_con_vang(), "loa đang phát (kể cả qua media_player) → bỏ tiếng mic"
+    loa.playing, loa.het_tieng = False, _t.monotonic() - 1.0
+    assert ve_tinh._loa_con_vang(), "mới dứt 1 s < 1,5 s → vẫn che"
+    loa.het_tieng = _t.monotonic() - 2.0
+    assert not ve_tinh._loa_con_vang()
+    await hass.config_entries.async_unload(muc.entry_id)

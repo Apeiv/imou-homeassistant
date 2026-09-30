@@ -11,7 +11,8 @@
  *       HIK_NGHI = ngồi yên (kênh đóng) ngần này giây thì đăng xuất và thoát (mặc định 60)
  *   kênh báo (fd trong HIK_BAO_FD, mặc định 3), mỗi dòng một tin:
  *       "SAN <mã> <tần_số>" đăng nhập xong  |  "OK" kênh đã mở  |  "DONG" kênh đã đóng
- *       "LOI <thông điệp>" hỏng (sau LOI lúc đăng nhập thì chương trình thoát)
+ *       "LOI <thông điệp>" hỏng (sau LOI lúc đăng nhập thì chương trình thoát; LOI GIỮA LƯỢT — gửi tiếng hỏng
+ *       hay SDK báo EXCEPTION_AUDIOEXCHANGE — thì kênh đã đóng, vẫn giữ đăng nhập cho lượt sau)
  *   stdin: mỗi mục = 4 byte độ dài (big-endian) + dữ liệu
  *       0xFFFFFFFF = mở kênh đàm thoại; n > 0 = một khung tiếng; 0 = phát nốt rồi đóng kênh
  *       hết stdin = đóng kênh (nếu đang mở), đăng xuất, thoát
@@ -56,8 +57,19 @@ typedef int (*f_comp)(int, AudioComp *);
 typedef void (*cb_t)(int, char *, unsigned, unsigned char, void *);
 typedef int (*f_start)(int, unsigned, cb_t, void *);
 typedef int (*f_send)(int, char *, unsigned);
+typedef void (*cb_ngoai_le)(unsigned, int, int, void *);
+typedef int (*f_exc)(unsigned, void *, cb_ngoai_le, void *);
 
 static FILE *bao;
+/* Issue #2 (30/09/2026): camera rớt mạng giữa bài mà chương trình vẫn gửi tiếp 44 phút — không xem kết quả
+ * NET_DVR_VoiceComSendData, không nghe ngoại lệ đàm thoại. SDK gọi hàm này từ luồng riêng; vòng chính đọc cờ. */
+#define EXCEPTION_AUDIOEXCHANGE 0x8001
+static volatile int kenh_hong = -1;                        /* lHandle kênh đàm thoại SDK báo hỏng */
+
+static void ngoai_le(unsigned loai, int uid, int h, void *u) {
+    (void)uid; (void)u;
+    if (loai == EXCEPTION_AUDIOEXCHANGE) kenh_hong = h;
+}
 
 static void bo_mic(int h, char *b, unsigned n, unsigned char f, void *u) {
     (void)h; (void)b; (void)n; (void)f; (void)u;           /* bỏ tiếng mic camera gửi về */
@@ -107,10 +119,12 @@ int main(int argc, char **argv) {
     SYM(f_login, NET_DVR_Login_V40) SYM(f_err, NET_DVR_GetLastError) SYM(f_comp, NET_DVR_GetCurrentAudioCompress)
     SYM(f_start, NET_DVR_StartVoiceCom_MR_V30) SYM(f_send, NET_DVR_VoiceComSendData)
     SYM(f_id, NET_DVR_StopVoiceCom) SYM(f_id, NET_DVR_Logout) SYM(f_int, NET_DVR_Cleanup)
+    f_exc dat_ngoai_le = (f_exc)dlsym(sdk, "NET_DVR_SetExceptionCallBack_V30");   /* không có thì chỉ dựa kết quả gửi */
 
     SdkPath p; memset(&p, 0, sizeof p); snprintf(p.sPath, sizeof p.sPath, "%s/", lib);
     NET_DVR_SetSDKInitCfg(2, &p);
     NET_DVR_Init();
+    if (dat_ngoai_le) dat_ngoai_le(0, NULL, ngoai_le, NULL);
     NET_DVR_SetConnectTime(5000, 1);
     LoginInfo li; memset(&li, 0, sizeof li);
     snprintf(li.sDeviceAddress, sizeof li.sDeviceAddress, "%s", argv[1]);
@@ -150,7 +164,7 @@ int main(int argc, char **argv) {
         if (!doc_du(dau, 4)) break;
         uint32_t n = ((uint32_t)dau[0] << 24) | ((uint32_t)dau[1] << 16) | ((uint32_t)dau[2] << 8) | dau[3];
         if (n == 0xFFFFFFFFu) {                            /* mở kênh */
-            if (h < 0) h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, bo_mic, NULL);
+            if (h < 0) { kenh_hong = -1; h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, bo_mic, NULL); }
             if (h < 0) fprintf(bao, "LOI camera không mở kênh đàm thoại (mã %u)\n", NET_DVR_GetLastError());
             else fprintf(bao, "OK\n");
             t0 = -1; da_phat = 0;
@@ -169,7 +183,14 @@ int main(int argc, char **argv) {
         if (h < 0) continue;                               /* khung lạc khi kênh đóng: bỏ */
         if (t0 < 0) t0 = bay_gio();
         ngu(t0 + da_phat - bay_gio());
-        NET_DVR_VoiceComSendData(h, (char *)khung, n);
+        int gui_duoc = NET_DVR_VoiceComSendData(h, (char *)khung, n);
+        if (!gui_duoc || kenh_hong == h) {
+            if (!gui_duoc) fprintf(bao, "LOI gửi tiếng hỏng (mã %u)\n", NET_DVR_GetLastError());
+            else fprintf(bao, "LOI camera rớt kênh đàm thoại (ngoại lệ 0x%x)\n", EXCEPTION_AUDIOEXCHANGE);
+            NET_DVR_StopVoiceCom(h);
+            h = -1;                                        /* khung còn lại của lượt này bị bỏ; vẫn giữ đăng nhập */
+            continue;
+        }
         da_phat += aac ? 1024.0 / tan_so : n / 8000.0;
     }
     if (h >= 0) {

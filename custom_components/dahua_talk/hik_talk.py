@@ -100,6 +100,8 @@ class TroGiup:
             os.close(w)
         #: ``time.monotonic()`` lúc kênh đóng lần gần nhất (mốc tính ngồi yên).
         self.ranh_tu = time.monotonic()
+        # Thu dọn ngay khi nó tự thoát vì ngồi yên (issue #2: camera lâu không nói để lại tiến trình <defunct>).
+        threading.Thread(target=self.p.wait, name="dahua-talk-hik-don", daemon=True).start()
         dong = self._doc(_CHO_MO_GIAY)
         if not dong.startswith("SAN "):
             self.close()
@@ -123,6 +125,23 @@ class TroGiup:
             self._du += b
         dong, self._du = self._du.split(b"\n", 1)
         return dong.decode("utf-8", "replace").strip()
+
+    def loi_giua_luot(self) -> str:
+        """Đọc KHÔNG CHẶN kênh báo giữa lượt nói: trả dòng «LOI …» nếu chương trình trợ giúp vừa báo (gửi tiếng hỏng,
+        camera rớt kênh đàm thoại), không thì "". Dòng khác giữ lại cho ``_doc``."""
+        while select.select([self._bao], [], [], 0)[0]:
+            b = os.read(self._bao, 4096)
+            if not b:
+                return "LOI HCNetSDK helper exited"
+            self._du += b
+        while b"\n" in self._du:
+            dong, _, con = self._du.partition(b"\n")
+            chu = dong.decode("utf-8", "replace").strip()
+            if chu.startswith("LOI"):
+                self._du = con
+                return chu
+            break
+        return ""
 
     def _gui(self, b: bytes) -> None:
         try:
@@ -190,6 +209,8 @@ class HikTalkSession:
         self._luong: threading.Thread | None = None
         self._t_dau: float | None = None
         self._da_ghi = 0.0
+        #: Lỗi luồng chuyển khung (chương trình trợ giúp chết…) — ``send_pcm`` ném ra thay vì kẹt ở stdin ffmpeg.
+        self._loi: BaseException | None = None
 
     def __enter__(self) -> HikTalkSession:
         # ffmpeg khởi động song song với lúc camera mở kênh (mã đã biết từ lúc đăng nhập).
@@ -229,18 +250,30 @@ class HikTalkSession:
                     du = du[n:]
                 if khung:
                     self.tg._gui(b"".join(struct.pack(">I", len(k)) + k for k in khung))
-        except (OSError, ValueError, TalkError):
-            pass
+        except (OSError, ValueError, TalkError) as exc:
+            # Issue #2: trước đây thoát LẶNG — không ai đọc ffmpeg, ống đầy, ``send_pcm`` kẹt ở stdin.write (cùng lớp
+            # với lỗi 8086 đã sửa ở 0.9.0). Ghi lỗi và tắt ffmpeg để ``send_pcm`` báo lỗi ngay.
+            self._loi = exc
+            if ff.poll() is None:
+                ff.kill()
 
     def send_pcm(self, pcm: bytes) -> None:
-        """PCM16 LE mono ``tan_so`` Hz. Trả về khi tiếng sắp phát xong (như ``TalkSession``)."""
+        """PCM16 LE mono ``tan_so`` Hz. Trả về khi tiếng sắp phát xong (như ``TalkSession``).
+
+        Camera rớt mạng giữa bài: chương trình trợ giúp báo «LOI …» (issue #2 — trước đây nó bỏ qua kết quả
+        ``NET_DVR_VoiceComSendData`` và loa «đang phát» 44 phút vào kết nối chết) → ném ``TalkError`` để
+        media_player tự nối lại / dừng."""
+        if self._loi is not None:
+            raise TalkError(f"HCNetSDK helper stopped taking audio ({self._loi})")
+        if loi := self.tg.loi_giua_luot():
+            raise TalkError(loi)
         if self._t_dau is None:
             self._t_dau = time.monotonic()
         try:
             self._ff.stdin.write(pcm)
             self._ff.stdin.flush()
         except (BrokenPipeError, ValueError, AttributeError) as exc:
-            raise TalkError(f"audio encoder stopped ({exc})") from exc
+            raise TalkError(f"audio encoder stopped ({self._loi or exc})") from exc
         self._da_ghi += len(pcm) / (2 * self.tan_so)
         cho = self._t_dau + self._da_ghi - _DI_TRUOC - time.monotonic()
         if cho > 0:

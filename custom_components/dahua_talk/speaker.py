@@ -142,8 +142,18 @@ class Speaker:
         """Gỡ entry: nhả thứ cách nói còn giữ giữa các lượt (đăng nhập HCNetSDK)."""
         dong = getattr(self._mo_phien, "close", None)
         if dong is not None:
-            async with self._lock:
+            # Chờ khoá CÓ HẠN (issue #4): lượt phát đang giữ khoá mà kẹt thì gỡ entry chờ mãi. Quá hạn thì vẫn nhả.
+            try:
+                async with asyncio.timeout(10):
+                    await self._lock.acquire()
+            except TimeoutError:
+                _LOGGER.warning("speaker still busy after 10 s, closing anyway")
                 await self.hass.async_add_executor_job(dong)
+                return
+            try:
+                await self.hass.async_add_executor_job(dong)
+            finally:
+                self._lock.release()
 
     async def async_play_pcm(self, chunks: AsyncIterator, tan_so: int = TAN_SO,
                              song: bool = False, huy: threading.Event | None = None) -> float:

@@ -104,6 +104,9 @@
     "number": {
       "mic_gain": {
         "name": "Microphone gain"
+      },
+      "mute_after_speaking": {
+        "name": "Mute mic after speaking"
       }
     }
   },

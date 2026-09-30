@@ -104,6 +104,9 @@
     "number": {
       "mic_gain": {
         "name": "Tăng mic"
+      },
+      "mute_after_speaking": {
+        "name": "Che mic sau khi nói"
       }
     }
   },

@@ -61,6 +61,10 @@ class DahuaTalkData:
     mic_gain_db: float = 0.0
     #: Bắt được từ gọi thì loa kêu "ting" — người gọi biết là nói được (công tắc riêng).
     ting: bool = True
+    #: Sau gói tiếng cuối loa gửi đi, mic vệ tinh còn bị bỏ ngần này giây (loa camera phát trễ + vang phòng). Issue
+    #: #3 (29/09/2026): EZVIZ qua HCNetSDK mở mic lại khi loa còn phát → đuôi câu trả lời lọt vào mic, vệ tinh tự đánh
+    #: thức 9 lần trong 6 phút. Mặc định theo đường nói (``che_mic_mac_dinh``), chỉnh từng camera bằng ô số.
+    che_mic_giay: float = 0.5
     _nghe_doi: list = field(default_factory=list)
     _nghe_tang: list = field(default_factory=list)
 
@@ -143,6 +147,12 @@ def _mo_phien_noi(d, ffmpeg: str = "ffmpeg", sdk_dir: str = "") -> callable:
     return MoPhienImou(host, user, pw, port=port, ffmpeg=ffmpeg)
 
 
+def che_mic_mac_dinh(d) -> float:
+    """Giây che mic sau khi nói, mặc định theo đường nói. HCNetSDK (EZVIZ): đo 29/09/2026 camera chỉ tắt mic ~2 s cho
+    lượt phát 2,6 s và loa trễ 1,3–1,5 s → 1,8 s. Đường khác: 0,5 s (như tiếng ting)."""
+    return 1.8 if d.get(CONF_TALK) == TALK_HIK else 0.5
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) -> bool:
     if not entry.data.get(CONF_INTERCOM_KEY):
         # Khoá bộ đàm riêng camera này, sinh một lần rồi giữ: dòng đã dán vào
@@ -154,6 +164,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
         speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary,
                                             hass.config.path(HIK_SDK_DIR))),
         mic_url=str(d.get(CONF_MIC_URL) or ""),
+        che_mic_giay=che_mic_mac_dinh(d),
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

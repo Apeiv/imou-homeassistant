@@ -1,7 +1,7 @@
 # hik — nói qua HCNetSDK (Hikvision / EZVIZ, cổng 8000)
 
 - `hik_noi.c` — mã nguồn chương trình trợ giúp. Dựng lại: `gcc -O2 -o hik_noi-x86_64 hik_noi.c -ldl`
-  (đã dựng trên Ubuntu 22.04, glibc 2.35).
+  (đã dựng trên Ubuntu 22.04, glibc 2.35; dựng lại 01/10/2026 cho issue #2 — cần glibc ≥ 2.34).
 - `hik_noi-x86_64` — bản đã dựng.
 - `glibc-x86_64/` — trình nạp và thư viện glibc / libstdc++ / libgcc_s / libuuid lấy nguyên từ
   Ubuntu 22.04, để chạy được trong container Home Assistant (Alpine, musl). glibc và libuuid theo
