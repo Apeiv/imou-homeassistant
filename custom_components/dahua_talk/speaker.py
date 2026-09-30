@@ -16,6 +16,7 @@ import io
 import logging
 import math
 import queue
+import threading
 import time
 import wave
 from array import array
@@ -81,18 +82,21 @@ class Speaker:
         """Tần số phiên sắp mở — nguồn tiếng nên sinh đúng tần số này (khỏi đổi hai lần)."""
         return int(getattr(self._mo_phien, "tan_so", TAN_SO))
 
-    def _phien(self, hang: "queue.Queue", vao: int, song: bool = False) -> float:
+    def _phien(self, hang: "queue.Queue", vao: int, song: bool = False,
+               huy: threading.Event | None = None) -> float:
         """Luồng executor: mở kênh nói, rút PCM ``vao`` Hz từ hàng đợi, đổi sang tần số của
         phiên nếu khác, rồi phát. Trả số giây.
 
         ``song``: nguồn sống — phần tử hàng đợi là ``(lúc tới, PCM)``; khúc im lặng đã trễ quá
-        ``TRE_SONG_GIAY`` thì bỏ."""
+        ``TRE_SONG_GIAY`` thì bỏ.
+        ``huy``: đặt thì thôi phát ngay sau khúc đang gửi — bỏ phần còn trong hàng đợi, đóng kênh."""
         giay = bo = 0.0
+        huy = huy or threading.Event()
         with self._mo_phien() as s:
             ra = int(getattr(s, "tan_so", TAN_SO))
             khoi = KHOI * ra // TAN_SO                  # 40 ms
             du = b""
-            while (muc := hang.get()) is not None:
+            while not huy.is_set() and (muc := hang.get()) is not None:
                 if song:
                     luc_toi, khuc = muc
                     if (time.monotonic() - luc_toi > TRE_SONG_GIAY
@@ -108,7 +112,7 @@ class Speaker:
                     self.het_tieng = time.monotonic()
                     giay += n / (2 * ra)
                     du = du[n:]
-            if du:
+            if du and not huy.is_set():
                 s.send_pcm(du)
                 self.het_tieng = time.monotonic()
                 giay += len(du) / (2 * ra)
@@ -124,22 +128,34 @@ class Speaker:
                 await self.hass.async_add_executor_job(dong)
 
     async def async_play_pcm(self, chunks: AsyncIterator, tan_so: int = TAN_SO,
-                             song: bool = False) -> float:
+                             song: bool = False, huy: threading.Event | None = None) -> float:
         """Phát luồng PCM16 mono ``tan_so`` Hz. Trả số giây đã phát.
 
         ``song=True`` (bộ đàm): ``chunks`` nhả ``(time.monotonic() lúc tiếng tới, PCM)`` — hàng
-        đợi bỏ bớt khoảng lặng để không tích trễ."""
+        đợi bỏ bớt khoảng lặng để không tích trễ.
+
+        ``huy``: bên gọi đặt để dừng giữa chừng (nút Stop của loa). Bị huỷ (HA tắt, gỡ entry) thì
+        tự đặt: luồng executor gửi đúng nhịp thời gian thực, không có cờ thì nó phát nốt cả bài và
+        HA phải chờ — đo 30/09/2026: HA mất 1 phút mới tắt được khi đang phát YouTube ra loa."""
+        huy = huy or threading.Event()
         async with self._lock:
             hang: queue.Queue = queue.Queue()
             self.playing = True
-            viec = self.hass.async_add_executor_job(self._phien, hang, tan_so, song)
+            viec = self.hass.async_add_executor_job(self._phien, hang, tan_so, song, huy)
             try:
                 try:
                     async for khuc in chunks:
+                        if huy.is_set():
+                            break
                         hang.put(khuc)
                 finally:
                     hang.put(None)          # luôn đóng phiên nói, kể cả khi nguồn hỏng
+                    if huy.is_set() and hasattr(chunks, "aclose"):
+                        await chunks.aclose()   # dừng giữa chừng: tắt ffmpeg ngay, đừng chờ dọn rác
                 return await viec
+            except asyncio.CancelledError:
+                huy.set()
+                raise
             finally:
                 self.playing = False
 
@@ -163,11 +179,11 @@ class Speaker:
                 proc.kill()
             await proc.wait()
 
-    async def async_play_url(self, url: str) -> float:
-        """Phát một URL (media source đã phân giải, tệp, luồng HTTP…)."""
+    async def async_play_url(self, url: str, huy: threading.Event | None = None) -> float:
+        """Phát một URL (media source đã phân giải, tệp, luồng HTTP…). ``huy``: xem `async_play_pcm`."""
         ts = self.tan_so
         return await self.async_play_pcm(self._ffmpeg_pcm(
-            ts, ["-protocol_whitelist", "http,https,file,tcp,tls", "-i", url]), ts)
+            ts, ["-protocol_whitelist", "http,https,file,tcp,tls", "-i", url]), ts, huy=huy)
 
     async def async_play_wav(self, data: bytes) -> float:
         """Phát một tệp WAV. Đúng sẵn PCM16 mono đúng tần số loa thì khỏi qua ffmpeg."""

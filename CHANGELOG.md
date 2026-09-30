@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 - 2026-09-30
+
+### Loa camera: nhạc phát nền, có nút Dừng — không còn phải khởi động lại HA
+- Trước: `play_media` (YouTube, nhạc) chờ tới khi phát hết bài mới trả về, và loa không có
+  Stop — muốn im chỉ còn cách khởi động lại HA; HA còn mất cả phút mới tắt xong vì luồng phát
+  đang gửi dở. Gặp thật 30/09/2026 khi phát YouTube ra loa camera phòng khách.
+- Nay: nhạc phát nền, lệnh trả về ngay; bài mới thay bài đang phát (nút "bài sau" dùng được);
+  thêm **Stop** (`media_player.media_stop`) — dừng sau khúc đang gửi (≤ 0,3 s), tắt ffmpeg.
+- Thông báo (`announce`, `tts.speak`) vẫn chờ phát xong như cũ để nối tiếp nhau.
+- HA tắt / gỡ camera: luồng phát thoát ngay, HA không phải chờ.
+
 ## 0.6.1 - 2026-09-29
 
 ### Sửa: tự tải HCNetSDK báo "sha256 mismatch"

@@ -45,7 +45,8 @@ async def test_loa_phat_url_va_tat_mic(hass):
         await hass.services.async_call("media_player", "play_media", {
             "entity_id": mp, "media_content_id": "http://x/a.mp3", "media_content_type": "music"},
             blocking=True)
-    phat.assert_awaited_once_with("http://x/a.mp3")
+        await hass.async_block_till_done()
+    assert phat.await_args.args[0] == "http://x/a.mp3"
     await hass.services.async_call("switch", "turn_on", {"entity_id": sw}, blocking=True)
     assert muc.runtime_data.mic_muted and hass.states.get(sw).state == "on"
 
@@ -473,3 +474,57 @@ async def test_thong_bao_url_treo_thi_co_han_va_mic_nghe_lai(hass):
             tts_token=None, media_id_source="url"))
     assert ve_tinh._dang_noi is False
     await hass.config_entries.async_unload(muc.entry_id)
+
+
+async def test_nhac_phat_nen_stop_duoc_bai_moi_thay_bai_cu(hass):
+    """Đo 30/09/2026: YouTube đẩy một bài vào loa camera thì lệnh phát treo suốt bài và loa không có
+    Stop — muốn im phải khởi động lại HA. Nhạc phải phát nền, Stop dừng được, bài mới thay bài cũ."""
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    dang: dict[str, object] = {}
+
+    async def phat_mai(url, huy=None):          # một "bài" chỉ dứt khi bị dừng
+        dang[url] = huy
+        while not huy.is_set():
+            await asyncio.sleep(0.01)
+        return 1.0
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", phat_mai):
+        await asyncio.wait_for(hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/a.mp3", "media_content_type": "music"},
+            blocking=True), timeout=2)
+        await asyncio.sleep(0.05)
+        assert hass.states.get(mp).state == "playing"
+        assert hass.states.get(mp).attributes["supported_features"] & 4096      # STOP
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/b.mp3", "media_content_type": "music"},
+            blocking=True)
+        await asyncio.sleep(0.05)
+        assert dang["http://x/a.mp3"].is_set() and not dang["http://x/b.mp3"].is_set()
+        assert hass.states.get(mp).state == "playing", "bài cũ dứt không được kéo trạng thái bài mới về idle"
+        await hass.services.async_call("media_player", "media_stop", {"entity_id": mp}, blocking=True)
+        assert dang["http://x/b.mp3"].is_set() and hass.states.get(mp).state == "idle"
+
+
+async def test_thong_bao_van_cho_phat_xong(hass):
+    """``announce`` (tts.speak, thông báo) chờ phát xong như cũ — các thông báo nối tiếp nhau."""
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    xong: list[str] = []
+
+    async def phat(url, huy=None):
+        await asyncio.sleep(0.05)
+        xong.append(url)
+        return 0.05
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", phat):
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/tb.mp3", "media_content_type": "music",
+            "announce": True}, blocking=True)
+    assert xong == ["http://x/tb.mp3"] and hass.states.get(mp).state == "idle"

@@ -9,7 +9,7 @@ Mỗi camera sinh ra:
 
 | Thực thể | Làm gì |
 |---|---|
-| `media_player.<camera>_speaker` | `tts.speak`, `media_player.play_media` ra loa camera |
+| `media_player.<camera>_speaker` | `tts.speak`, `media_player.play_media` ra loa camera; nhạc phát nền, có `media_stop` |
 | `assist_satellite.<camera>` | Nghe mic camera, chạy pipeline Assist, trả lời ra loa; `announce` / `start_conversation` |
 | `number.<camera>_microphone_gain` | Tăng mic 0–30 dB (bắt đầu **0 dB**) |
 | `switch.<camera>_wake_sound` | Kêu "ting" khi bắt được từ gọi |

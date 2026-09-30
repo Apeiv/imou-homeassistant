@@ -89,3 +89,47 @@ def test_khong_phai_nguon_song_thi_phat_du_nhu_cu():
     phien, tre = _chay(song=False)
     assert tre > 1.0                           # TTS / tệp: phát trọn, không bỏ gì
     assert sum(len(p) for _t, p in phien.gui) == 2 * int(TS * (0.3 + 0.5 + 1.0 + 0.5))
+
+
+def test_co_huy_dung_giua_bai():
+    """Stop / HA tắt: luồng phát thoát sau khúc đang gửi, bỏ phần còn trong hàng đợi."""
+    phien = _Phien(0.0)
+    loa = speaker.Speaker(None, lambda: phien)
+    hang: queue.Queue = queue.Queue()
+    for k in _song(5.0):                       # 5 giây tiếng đã nằm sẵn trong hàng đợi
+        hang.put(k)
+    hang.put(None)
+    huy = threading.Event()
+    threading.Timer(0.2, huy.set).start()
+    t0 = time.monotonic()
+    loa._phien(hang, TS, False, huy)
+    assert time.monotonic() - t0 < 0.5
+    assert sum(len(p) for _t, p in phien.gui) < 2 * TS * 0.5
+
+
+async def test_bi_huy_thi_luong_phat_thoat_ngay(hass):
+    """Đo 30/09/2026: HA mất 1 phút mới tắt được vì luồng phát YouTube ra loa camera còn gửi dở."""
+    import asyncio
+
+    dong = threading.Event()
+
+    class _PhienDong(_Phien):
+        def __exit__(self, *_a):
+            dong.set()
+
+    phien = _PhienDong(0.0)
+    loa = speaker.Speaker(hass, lambda: phien)
+
+    async def nguon():
+        for k in _song(30.0):
+            yield k
+
+    viec = asyncio.ensure_future(loa.async_play_pcm(nguon(), TS))
+    await asyncio.sleep(0.3)
+    viec.cancel()
+    try:
+        await viec
+    except asyncio.CancelledError:
+        pass
+    assert await hass.async_add_executor_job(dong.wait, 1.0), "luồng phát phải đóng kênh ngay khi bị huỷ"
+    assert not loa.playing
