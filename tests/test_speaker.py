@@ -133,3 +133,23 @@ async def test_bi_huy_thi_luong_phat_thoat_ngay(hass):
         pass
     assert await hass.async_add_executor_job(dong.wait, 1.0), "luồng phát phải đóng kênh ngay khi bị huỷ"
     assert not loa.playing
+
+
+def test_nhan_bien_do_giam_tang_va_chan_dinh():
+    pcm = struct.pack("<3h", 1000, -1000, 30000)
+    assert struct.unpack("<3h", speaker.nhan_bien_do(pcm, 0.5)) == (500, -500, 15000)
+    assert struct.unpack("<3h", speaker.nhan_bien_do(pcm, 2.0)) == (2000, -2000, 32767), "chặn đỉnh, không tràn"
+    assert speaker.nhan_bien_do(pcm, 1.0) is pcm
+
+
+def test_am_luong_ap_cho_nhac_khong_ap_cho_bo_dam():
+    for song, mong in ((False, 500), (True, 1000)):
+        phien = _Phien(0.0)
+        loa = speaker.Speaker(None, lambda phien=phien: phien)
+        loa.he_so = 0.5
+        hang: queue.Queue = queue.Queue()
+        k = struct.pack(f"<{int(TS * 0.04)}h", *([1000] * int(TS * 0.04)))
+        hang.put((time.monotonic(), k) if song else k)
+        hang.put(None)
+        loa._phien(hang, TS, song)
+        assert struct.unpack_from("<h", phien.gui[0][1])[0] == mong

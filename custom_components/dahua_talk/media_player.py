@@ -25,9 +25,11 @@ from homeassistant.components.media_player import (
 from homeassistant.components.media_player.const import ATTR_MEDIA_ANNOUNCE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import DahuaTalkConfigEntry
 from .entity import DahuaTalkEntity
+from .speaker import HE_SO_TOI_DA
 from .talk import TalkError
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,12 +40,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry,
     async_add_entities([DahuaTalkPlayer(entry)])
 
 
-class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity):
+class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
     _attr_translation_key = "speaker"
     _attr_supported_features = (MediaPlayerEntityFeature.PLAY_MEDIA
                                  | MediaPlayerEntityFeature.BROWSE_MEDIA
                                  | MediaPlayerEntityFeature.MEDIA_ANNOUNCE
-                                 | MediaPlayerEntityFeature.STOP)
+                                 | MediaPlayerEntityFeature.STOP
+                                 | MediaPlayerEntityFeature.VOLUME_SET
+                                 | MediaPlayerEntityFeature.VOLUME_STEP)
+    #: 50% = tiếng gốc của camera (xem `speaker.HE_SO_TOI_DA`): camera mới thêm vẫn kêu như trước.
+    _attr_volume_level = 0.5
 
     def __init__(self, entry: DahuaTalkConfigEntry) -> None:
         super().__init__(entry)
@@ -90,6 +96,22 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         await self.async_media_stop()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        cu = await self.async_get_last_state()
+        muc = (cu.attributes.get("volume_level") if cu is not None else None)
+        if isinstance(muc, (int, float)):
+            self._dat_am_luong(float(muc))
+
+    def _dat_am_luong(self, muc: float) -> None:
+        self._attr_volume_level = min(1.0, max(0.0, muc))
+        self._entry.runtime_data.speaker.he_so = HE_SO_TOI_DA * self._attr_volume_level
+
+    async def async_set_volume_level(self, volume: float) -> None:
+        """Âm lượng loa từng camera (phần mềm, mọi loại camera) — đổi lúc đang phát thì khúc kế tiếp theo ngay."""
+        self._dat_am_luong(volume)
+        self.async_write_ha_state()
 
     async def async_browse_media(self, media_content_type: MediaType | str | None = None,
                                  media_content_id: str | None = None) -> BrowseMedia:

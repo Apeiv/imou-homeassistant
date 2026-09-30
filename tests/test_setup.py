@@ -528,3 +528,23 @@ async def test_thong_bao_van_cho_phat_xong(hass):
             "entity_id": mp, "media_content_id": "http://x/tb.mp3", "media_content_type": "music",
             "announce": True}, blocking=True)
     assert xong == ["http://x/tb.mp3"] and hass.states.get(mp).state == "idle"
+
+
+async def test_am_luong_tung_camera_va_nho_qua_khoi_dong_lai(hass):
+    """Chủ máy 30/09/2026: "có thêm được chỉnh volume cho từng cam không" — 50% = tiếng gốc, 100% = +6 dB."""
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    muc = _muc()
+    mock_restore_cache(hass, [State("media_player.cam_cua_speaker", "idle", {"volume_level": 0.25})])
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    loa = muc.runtime_data.speaker
+    assert mp == "media_player.cam_cua_speaker"
+    assert hass.states.get(mp).attributes["volume_level"] == 0.25 and loa.he_so == 0.5, "nhớ mức cũ"
+    await hass.services.async_call("media_player", "volume_set", {"entity_id": mp, "volume_level": 1.0},
+                                   blocking=True)
+    assert hass.states.get(mp).attributes["volume_level"] == 1.0 and loa.he_so == 2.0
+    assert hass.states.get(mp).attributes["supported_features"] & 4    # VOLUME_SET

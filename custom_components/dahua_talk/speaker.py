@@ -38,6 +38,21 @@ TRE_SONG_GIAY = 0.15
 NGUONG_IM_DB = -45.0
 
 
+#: Âm lượng loa phần mềm: hệ số nhân biên độ tối đa. media_player 50% = tiếng gốc camera (hệ số 1),
+#: 100% = hệ số này (+6 dB). Làm TRƯỚC khi gửi nên chạy với mọi đường nói (Imou 8086, Dahua 37777, kênh
+#: ngược RTSP, HCNetSDK) — không phụ thuộc camera có API âm lượng hay không.
+HE_SO_TOI_DA = 2.0
+
+
+def nhan_bien_do(pcm: bytes, he_so: float) -> bytes:
+    """PCM16 × ``he_so``, chặn ở biên int16 — tăng quá tay thì bẹt đỉnh chứ không tràn số kêu rè."""
+    if he_so == 1.0 or not pcm:
+        return pcm
+    a = array("h")
+    a.frombytes(pcm[: len(pcm) // 2 * 2])
+    return array("h", (max(-32768, min(32767, int(x * he_so))) for x in a)).tobytes()
+
+
 def muc_db(pcm: bytes) -> float:
     a = array("h")
     a.frombytes(pcm[: len(pcm) // 2 * 2])
@@ -73,6 +88,9 @@ class Speaker:
         self._mo_phien = mo_phien
         self._lock = asyncio.Lock()
         self.playing = False
+        #: Âm lượng loa (hệ số biên độ, xem `HE_SO_TOI_DA`) — đọc lại ở MỖI khúc nên đổi lúc đang phát có tác
+        #: dụng ngay. Không áp cho nguồn sống (bộ đàm): tiếng người nói giữ nguyên.
+        self.he_so = 1.0
         #: ``time.monotonic()`` lúc gói tiếng CUỐI vừa gửi sang camera (``send_pcm`` gửi đúng
         #: nhịp thời gian thực nên đây là lúc tiếng dứt phía gửi) — chưa tính đóng phiên.
         self.het_tieng = 0.0
@@ -104,7 +122,7 @@ class Speaker:
                         bo += len(khuc) / (2 * vao)
                         continue
                 else:
-                    khuc = muc
+                    khuc = nhan_bien_do(muc, self.he_so)
                 du += doi_tan_so(khuc, vao, ra)
                 n = len(du) // khoi * khoi
                 if n:

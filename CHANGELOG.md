@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 - 2026-09-30
+
+### Âm lượng loa từng camera
+- Loa camera có `volume_set` (thanh âm lượng trên thẻ media, thẻ YouTube, `media_player.volume_set`):
+  **50% = tiếng gốc** của camera, 100% = gấp đôi (+6 dB, chặn đỉnh để không vỡ tiếng), 0% = tắt tiếng.
+  Mỗi camera nhớ mức riêng qua lần khởi động lại HA; camera mới mặc định 50% — kêu y như trước.
+- Làm bằng phần mềm ngay trước khi gửi, nên chạy với MỌI loại camera (Imou 8086, Dahua 37777,
+  EZVIZ/Hikvision qua RTSP hay HCNetSDK). Đổi lúc đang phát thì khúc kế tiếp theo ngay.
+- Áp cho nhạc, thông báo, câu trả lời Assist; bộ đàm (tiếng người nói trực tiếp) giữ nguyên.
+
 ## 0.7.0 - 2026-09-30
 
 ### Loa camera: nhạc phát nền, có nút Dừng — không còn phải khởi động lại HA
