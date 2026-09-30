@@ -202,3 +202,16 @@ def test_camera_cat_ket_noi_giua_bai_thi_bao_loi_khong_ket():
     assert not t.is_alive(), "send_pcm kẹt sau khi camera cắt kết nối"
     assert loi and "8086" in str(loi[0]) and time.monotonic() - t0 < 8
     cam.luong.join(2)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="cần ffmpeg")
+def test_giu_phien_gui_lai_play_dinh_ky():
+    """Đo 30/09/2026: Imou cắt kênh nói 8086 sau 71–115 s; gửi lại PLAY mỗi 30 s thì 200 s vẫn chạy."""
+    cam = Camera8086Gia()
+    with mock.patch.object(http_talk, "GIU_PHIEN_GIAY", 0.3):
+        with http_talk.HttpTalkSession("127.0.0.1", "admin", "mk", port=cam.cong) as s:
+            s.send_pcm(b"\x10\x00" * 16000)                            # 1 giây
+    cam.luong.join(2)
+    giu = [y for y in cam.yeu_cau[3:] if "trackID=64" in y and "talktype=talk" in y]
+    assert len(giu) >= 2, cam.yeu_cau
+    assert len(cam.khung) >= 10, "khung tiếng vẫn đi trọn, không bị yêu cầu giữ phiên chen vỡ"

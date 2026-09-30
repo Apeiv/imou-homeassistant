@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 - 2026-09-30
+
+### Nhạc dài không còn bị cắt giữa bài
+- Đo trên Imou thật: camera tự đóng kênh nói cổng 8086 sau 71–115 giây (nhạc im giữa bài, log "Broken pipe").
+  Nay tích hợp gửi lại yêu cầu giữ phiên mỗi 30 giây — đo lại 200 giây liền không bị cắt.
+- Dự phòng: camera vẫn cắt giữa bài thì tự nối lại và phát TIẾP đúng giây đang dở (tối đa 20 lần một bài;
+  camera từ chối ngay thì thôi, không thử mãi).
+
+### Thanh tua cho loa camera
+- Loa báo bài đang phát và vị trí (`media_content_id`, `media_position`) và nhận **Tua** (`media_seek`) —
+  thẻ phát nhạc (kể cả thẻ YouTube ở chế độ chỉ nghe) hiện thanh thời gian và tua được.
+
 ## 0.9.0 - 2026-09-30
 
 ### Sửa: loa camera "phát một lúc thì đơ, không Stop được" (và YouTube không phát được sau đó)

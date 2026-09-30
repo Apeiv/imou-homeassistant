@@ -48,6 +48,9 @@ _SDP = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Talk\r\nc=IN IP4 0.0.0.0\r\nt=0 0\
 _CHU_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 #: Camera từ chối 8086 thì ngần này giây sau mới thử lại.
 LUI_37777_GIAY = 3600.0
+#: Gửi lại yêu cầu PLAY kênh nói mỗi ngần này giây để camera không đóng phiên. Đo 30/09/2026 trên Imou thật: không
+#: gửi thì camera cắt kết nối sau 71–115 s ("Broken pipe" — nhạc dài im giữa bài); gửi mỗi 30 s thì 200 s vẫn chạy.
+GIU_PHIEN_GIAY = 30.0
 
 
 def _wsse(user: str, bi_mat: str, nonce: str, tao: str) -> str:
@@ -106,6 +109,7 @@ class HttpTalkSession:
         self._da_ghi = 0.0
         #: Lỗi luồng gửi (camera đóng kết nối…) — ``send_pcm`` ném ra thay vì kẹt.
         self._loi: BaseException | None = None
+        self._khoa_gui = threading.Lock()
 
     def __enter__(self) -> HttpTalkSession:
         try:
@@ -120,6 +124,10 @@ class HttpTalkSession:
 
     # bắt tay -----------------------------------------------------------------
     def _play(self, track: int, *, sdp: bytes = b"", them: str = "") -> int:
+        self.s.sendall(self._yeu_cau(track, sdp=sdp, them=them))
+        return self._doc_tra_loi()
+
+    def _yeu_cau(self, track: int, *, sdp: bytes = b"", them: str = "") -> bytes:
         nonce = "".join(_CHU_NONCE[b % len(_CHU_NONCE)] for b in os.urandom(32))
         tao = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         bi_mat = self.password
@@ -136,8 +144,7 @@ class HttpTalkSession:
             dong += ["Accpet-Sdp: Private", "Private-Type: application/sdp",
                      f"Private-Length: {len(sdp)}"]
         self._cseq += 1
-        self.s.sendall(("\r\n".join(dong) + "\r\n\r\n").encode() + sdp)
-        return self._doc_tra_loi()
+        return ("\r\n".join(dong) + "\r\n\r\n").encode() + sdp
 
     def _doc_tra_loi(self) -> int:
         du = b""
@@ -189,7 +196,8 @@ class HttpTalkSession:
         self.s.settimeout(1.0)
         self._luong = [threading.Thread(target=self._xa, name="dahua-talk-8086-doc", daemon=True),
                        threading.Thread(target=self._gui, args=(self._ff,),
-                                        name="dahua-talk-8086-gui", daemon=True)]
+                                        name="dahua-talk-8086-gui", daemon=True),
+                       threading.Thread(target=self._giu, name="dahua-talk-8086-giu", daemon=True)]
         for t in self._luong:
             t.start()
 
@@ -203,6 +211,16 @@ class HttpTalkSession:
             except TimeoutError:
                 continue
             except OSError:
+                return
+
+    def _giu(self) -> None:
+        """Giữ phiên: gửi lại PLAY kênh nói định kỳ (trả lời của camera do ``_xa`` đọc bỏ)."""
+        while not self._dung.wait(GIU_PHIEN_GIAY):
+            try:
+                goi = self._yeu_cau(64, them="&talktype=talk")
+                with self._khoa_gui:
+                    self.s.sendall(goi)
+            except (OSError, AttributeError):
                 return
 
     def _gui(self, ff: subprocess.Popen) -> None:
@@ -221,7 +239,8 @@ class HttpTalkSession:
                     cho = t0 + seq * _KHUNG_GIAY - time.monotonic()
                     if cho > 0:
                         time.sleep(cho)
-                    self.s.sendall(khung_dhav(k, seq, tick + int(seq * 64), giay))
+                    with self._khoa_gui:        # không xen byte với yêu cầu giữ phiên
+                        self.s.sendall(khung_dhav(k, seq, tick + int(seq * 64), giay))
                     seq += 1
         except (OSError, ValueError, AttributeError) as exc:
             # Camera đóng kết nối / gửi quá hạn. Trước đây thoát LẶNG: không ai đọc ffmpeg nữa, ống đầy,

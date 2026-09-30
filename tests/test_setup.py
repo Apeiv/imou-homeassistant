@@ -620,3 +620,71 @@ async def test_stop_khong_treo_khi_luong_phat_ket(hass):
         await asyncio.wait_for(hass.services.async_call("media_player", "media_stop", {"entity_id": mp},
                                                         blocking=True), timeout=2)
     assert hass.states.get(mp).state == "idle"
+
+
+async def test_camera_cat_giua_bai_thi_noi_lai_phat_tiep(hass):
+    """Đo 30/09/2026 21:19: Imou cắt cổng 8086 sau ~70 s ("Broken pipe") và nhạc im luôn — chủ máy: "đang phát nhạc
+    local thì dừng không thấy phát nữa". Nay nối lại phát tiếp đúng chỗ; camera từ chối ngay thì thôi, không thử mãi."""
+    from types import SimpleNamespace
+
+    from custom_components.dahua_talk import media_player as mpmod
+    from custom_components.dahua_talk.talk import TalkError
+
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    lan: list[float] = []
+    gio = [0.0]
+
+    async def phat(url, huy=None, tu_giay=0.0):
+        lan.append(tu_giay)
+        if len(lan) == 1:
+            gio[0] += 70.0                     # phát được 70 s rồi camera cắt
+            raise TalkError("camera stopped taking audio on port 8086 (Broken pipe)")
+        raise TalkError("camera refused talk on port 8086 (code 503)")     # từ chối ngay
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", phat), \
+            mock.patch.object(mpmod, "time", SimpleNamespace(monotonic=lambda: gio[0])):
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/nhac.mp3", "media_content_type": "music"}, blocking=True)
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    assert lan == [0.0, 70.0], "nối lại đúng một lần, phát tiếp từ giây 70"
+    assert hass.states.get(mp).state == "idle"
+
+
+async def test_bao_vi_tri_va_tua(hass):
+    """Chủ máy 30/09/2026: "chế độ chỉ nghe không có thanh tua nhạc" — loa phải báo vị trí + bài đang phát và nhận SEEK."""
+    from types import SimpleNamespace
+
+    from custom_components.dahua_talk import media_player as mpmod
+
+    muc = _muc()
+    await _nap(hass, muc)
+    reg = er.async_get(hass)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(reg, muc.entry_id)
+              if e.domain == "media_player")
+    lan: list[float] = []
+
+    async def phat(url, huy=None, tu_giay=0.0):
+        lan.append(tu_giay)
+        while not huy.is_set():
+            await asyncio.sleep(0.01)
+        return 1.0
+
+    with mock.patch.object(muc.runtime_data.speaker, "async_play_url", phat), \
+            mock.patch.object(mpmod, "time", SimpleNamespace(monotonic=lambda: 0.0)):
+        await hass.services.async_call("media_player", "play_media", {
+            "entity_id": mp, "media_content_id": "http://x/nhac.mp3", "media_content_type": "music"}, blocking=True)
+        await asyncio.sleep(0.03)
+        st = hass.states.get(mp)
+        assert st.attributes["supported_features"] & 2, "SEEK"
+        assert st.attributes["media_content_id"] == "http://x/nhac.mp3" and st.attributes["media_position"] == 0
+        await hass.services.async_call("media_player", "media_seek", {"entity_id": mp, "seek_position": 95},
+                                       blocking=True)
+        await asyncio.sleep(0.03)
+        assert lan == [0.0, 95.0] and hass.states.get(mp).attributes["media_position"] == 95
+        await hass.services.async_call("media_player", "media_stop", {"entity_id": mp}, blocking=True)
+        assert "media_position" not in hass.states.get(mp).attributes

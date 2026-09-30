@@ -27,6 +27,7 @@ from homeassistant.components.media_player.const import ATTR_MEDIA_ANNOUNCE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from . import DahuaTalkConfigEntry
 from .entity import DahuaTalkEntity
@@ -37,6 +38,9 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Nút Stop / Pause chờ luồng phát thoát tối đa ngần này giây rồi huỷ — không bao giờ treo.
 _CHO_DUNG_GIAY = 8.0
+#: Camera cắt kênh nói giữa bài: tự nối lại nếu lượt vừa rồi đã phát ít nhất ngần này giây, tối đa ngần ấy lần một bài.
+_NOI_LAI_KHI_DA_PHAT_GIAY = 5.0
+_NOI_LAI_TOI_DA = 20
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry,
@@ -52,6 +56,7 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
                                  | MediaPlayerEntityFeature.STOP
                                  | MediaPlayerEntityFeature.PAUSE
                                  | MediaPlayerEntityFeature.PLAY
+                                 | MediaPlayerEntityFeature.SEEK
                                  | MediaPlayerEntityFeature.VOLUME_SET
                                  | MediaPlayerEntityFeature.VOLUME_STEP)
     #: 50% = tiếng gốc của camera (xem `speaker.HE_SO_TOI_DA`): camera mới thêm vẫn kêu như trước.
@@ -70,9 +75,12 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         self._url: str | None = None
         self._tu_giay = 0.0
         self._bat_dau = 0.0
+        #: Số lần đã tự nối lại trong bài này (camera cắt kênh nói giữa bài).
+        self._noi_lai = 0
 
     async def async_play_media(self, media_type: MediaType | str, media_id: str,
                                **kwargs: Any) -> None:
+        goc = media_id
         if media_source.is_media_source_id(media_id):
             play = await media_source.async_resolve_media(self.hass, media_id, self.entity_id)
             media_id = play.url
@@ -87,10 +95,15 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
                 await self.async_media_play()
             return
         await self.async_media_stop()
+        self._noi_lai = 0
+        # Bài đang phát (id gốc) + vị trí: thẻ phát nhạc dựng thanh TUA từ đây (chủ máy 30/09/2026: "chế độ chỉ
+        # nghe không có thanh tua nhạc").
+        self._attr_media_content_id, self._attr_media_content_type = goc, media_type
         self._bat_dau_bai(url, 0.0)
 
     def _bat_dau_bai(self, url: str, tu_giay: float) -> None:
         self._url, self._tu_giay, self._bat_dau = url, tu_giay, time.monotonic()
+        self._dat_vi_tri(tu_giay)
         self._huy = huy = threading.Event()
         self._bai = self.hass.async_create_background_task(
             self._phat(url, huy, tu_giay=tu_giay), f"{self.entity_id} play_media")
@@ -100,10 +113,22 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         self._attr_state = MediaPlayerState.PLAYING
         self.async_write_ha_state()
         het_bai = False
+        luc_mo = time.monotonic()
         try:
             await self._entry.runtime_data.speaker.async_play_url(url, huy, tu_giay)
             het_bai = not huy.is_set()
         except (TalkError, OSError) as exc:
+            da_phat = time.monotonic() - luc_mo
+            if (not thong_bao and not huy.is_set() and self._huy is huy
+                    and da_phat >= _NOI_LAI_KHI_DA_PHAT_GIAY and self._noi_lai < _NOI_LAI_TOI_DA):
+                # Camera cắt kênh nói GIỮA BÀI (đo 30/09/2026: Imou cắt cổng 8086 sau ~70 s, "Broken pipe") — nối
+                # lại và phát tiếp đúng chỗ thay vì im luôn (chủ máy: "đang phát nhạc local thì dừng không thấy phát
+                # nữa"). Chỉ nối khi lượt vừa rồi đã phát được một lúc: camera từ chối ngay thì không thử mãi.
+                self._noi_lai += 1
+                _LOGGER.info("%s: camera dropped the talk channel after %.0f s (%s), resuming at %.0f s (%d/%d)",
+                             self.entity_id, da_phat, exc, tu_giay + da_phat, self._noi_lai, _NOI_LAI_TOI_DA)
+                self._bat_dau_bai(url, tu_giay + da_phat)
+                return
             _LOGGER.warning("%s: cannot play to camera speaker: %s", self.entity_id, exc)
             het_bai = True
         finally:
@@ -112,6 +137,7 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
             elif self._huy is huy and het_bai:     # bài tự hết (không phải bị dừng / thay)
                 self._attr_state = MediaPlayerState.IDLE
                 self._url = self._huy = self._bai = None
+                self._xoa_bai()
             self.async_write_ha_state()
 
     async def _dung_bai(self) -> None:
@@ -132,6 +158,7 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         """Dừng hẳn bài đang phát (hay đang tạm dừng)."""
         await self._dung_bai()
         self._url = None
+        self._xoa_bai()
         self._attr_state = MediaPlayerState.IDLE
         self.async_write_ha_state()
 
@@ -141,6 +168,7 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
             return
         self._tu_giay += time.monotonic() - self._bat_dau
         await self._dung_bai()
+        self._dat_vi_tri(self._tu_giay)
         self._attr_state = MediaPlayerState.PAUSED
         self.async_write_ha_state()
 
@@ -149,6 +177,27 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         if self._url is None or self._attr_state == MediaPlayerState.PLAYING:
             return
         self._bat_dau_bai(self._url, self._tu_giay)
+
+    async def async_media_seek(self, position: float) -> None:
+        """Tua: phát lại từ giây ``position`` (ffmpeg ``-ss``); đang tạm dừng thì chỉ dời chỗ sẽ phát tiếp."""
+        if self._url is None:
+            return
+        position = max(0.0, float(position))
+        if self._attr_state == MediaPlayerState.PLAYING:
+            await self._dung_bai()
+            self._bat_dau_bai(self._url, position)
+        else:
+            self._tu_giay = position
+            self._dat_vi_tri(position)
+        self.async_write_ha_state()
+
+    def _dat_vi_tri(self, giay: float) -> None:
+        self._attr_media_position = int(giay)
+        self._attr_media_position_updated_at = dt_util.utcnow()
+
+    def _xoa_bai(self) -> None:
+        self._attr_media_position = self._attr_media_position_updated_at = None
+        self._attr_media_content_id = self._attr_media_content_type = None
 
     async def async_will_remove_from_hass(self) -> None:
         await self._dung_bai()
