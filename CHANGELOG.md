@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2 - 2026-09-30
+
+### Sửa: thanh tua hiện mà đứng yên
+- Trên HA 2026.9 (Python 3.14) loa không đưa được `media_position` vào trạng thái dù đã đặt (bản 0.9.1 đo được:
+  đang phát có `media_content_id` mà không có vị trí). Nay loa tự khai `media_position` /
+  `media_position_updated_at` — thẻ phát nhạc tính được thời gian đang chạy.
+
 ## 0.9.1 - 2026-09-30
 
 ### Nhạc dài không còn bị cắt giữa bài

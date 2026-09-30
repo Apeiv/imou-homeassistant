@@ -587,11 +587,16 @@ async def test_tam_dung_phat_tiep_va_thong_bao_chen_ngang(hass):
         await asyncio.sleep(0.03)
         assert hass.states.get(mp).state == "playing" and lan[-1] == ("http://x/nhac.mp3", 30.0)
         gio[0] = 140.0
+        trang_thai: list = []
+        huy_nghe = hass.bus.async_listen("state_changed", lambda e: trang_thai.append(e.data["new_state"])
+                                         if e.data["entity_id"] == mp else None)
         await hass.services.async_call("media_player", "play_media", {
             "entity_id": mp, "media_content_id": "http://x/tb.mp3", "media_content_type": "music",
             "announce": True}, blocking=True)
+        huy_nghe()
         await asyncio.sleep(0.03)
         assert lan[-2:] == [("http://x/tb.mp3", 0.0), ("http://x/nhac.mp3", 40.0)], "đọc xong phát tiếp đúng chỗ"
+        assert "idle" not in [s.state for s in trang_thai], "không «idle» giữa thông báo và phát tiếp (YouTube đọc là hết bài)"
         assert hass.states.get(mp).state == "playing"
         await hass.services.async_call("media_player", "media_stop", {"entity_id": mp}, blocking=True)
         assert hass.states.get(mp).state == "idle"

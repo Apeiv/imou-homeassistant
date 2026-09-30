@@ -77,6 +77,8 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
         self._bat_dau = 0.0
         #: Số lần đã tự nối lại trong bài này (camera cắt kênh nói giữa bài).
         self._noi_lai = 0
+        self._vi_tri: int | None = None
+        self._vi_tri_luc = None
 
     async def async_play_media(self, media_type: MediaType | str, media_id: str,
                                **kwargs: Any) -> None:
@@ -133,7 +135,9 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
             het_bai = True
         finally:
             if thong_bao:
-                self._attr_state = MediaPlayerState.IDLE
+                # Nhạc đang tạm dừng chờ phát tiếp thì báo PAUSED, đừng «idle» một nhịp: tích hợp phát nhạc (YouTube)
+                # đọc idle là HẾT BÀI rồi chuyển bài khác.
+                self._attr_state = MediaPlayerState.PAUSED if self._url is not None else MediaPlayerState.IDLE
             elif self._huy is huy and het_bai:     # bài tự hết (không phải bị dừng / thay)
                 self._attr_state = MediaPlayerState.IDLE
                 self._url = self._huy = self._bai = None
@@ -191,12 +195,24 @@ class DahuaTalkPlayer(DahuaTalkEntity, MediaPlayerEntity, RestoreEntity):
             self._dat_vi_tri(position)
         self.async_write_ha_state()
 
+    # Vị trí khai bằng THUỘC TÍNH RIÊNG, không qua ``_attr_media_position``: đo 30/09/2026 trên HA 2026.9.4 (Python
+    # 3.14) gán ``_attr_media_position`` mà trạng thái vẫn KHÔNG có ``media_position`` (``media_content_id`` gán cùng
+    # lúc thì có) — thanh tua hiện mà đứng yên. Trên HA 2026.2 của bộ test thì có. Tự trả biến của mình thì bản nào
+    # cũng đúng.
+    @property
+    def media_position(self) -> int | None:
+        return self._vi_tri
+
+    @property
+    def media_position_updated_at(self):
+        return self._vi_tri_luc
+
     def _dat_vi_tri(self, giay: float) -> None:
-        self._attr_media_position = int(giay)
-        self._attr_media_position_updated_at = dt_util.utcnow()
+        self._vi_tri = int(giay)
+        self._vi_tri_luc = dt_util.utcnow()
 
     def _xoa_bai(self) -> None:
-        self._attr_media_position = self._attr_media_position_updated_at = None
+        self._vi_tri = self._vi_tri_luc = None
         self._attr_media_content_id = self._attr_media_content_type = None
 
     async def async_will_remove_from_hass(self) -> None:
