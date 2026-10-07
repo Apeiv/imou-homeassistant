@@ -23,6 +23,9 @@ dùng add-on Samba / File editor / SSH — rồi ⋮ → **Cấu hình lại** �
 
 Camera phải mở cổng **8000** trong mạng nhà (EZVIZ Studio → Network → *Device Port*).
 
+Firmware EZVIZ mới (vd **DB1C**) đóng cổng 8000, chỉ mở SDK qua TLS ở **8443**: điền *Cổng HCNetSDK* = `8443`
+(lúc thêm hoặc **Cấu hình lại**). Cổng 8443 đăng nhập với `byHttps=1`, không kiểm chứng chỉ (CA riêng của EZVIZ).
+
 ## Chuẩn bị camera
 
 - **IP tĩnh**; mã hoá hình **H.264**; một số đời phải bật **RTSP / xem qua LAN** trong app.

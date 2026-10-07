@@ -183,7 +183,9 @@ def test_sdk_san_sang_can_ca_sdk_lan_ban_tro_giup(tmp_path):
         hik_talk._THU_MUC / f"hik_noi-{hik_talk.kien_truc()}").is_file()
 
 
-async def test_them_ezviz_co_sdk_thi_noi_qua_hik(hass):
+@pytest.mark.parametrize("cong", [None, 8443])
+async def test_them_ezviz_co_sdk_thi_noi_qua_hik(hass, cong):
+    """Default HCNetSDK port 8000; 8443 (SDK over TLS, EZVIZ DB1C) when the user picks it."""
     from homeassistant.data_entry_flow import FlowResultType
     from homeassistant.setup import async_setup_component
     assert await async_setup_component(hass, "homeassistant", {})
@@ -194,10 +196,32 @@ async def test_them_ezviz_co_sdk_thi_noi_qua_hik(hass):
         kq = await hass.config_entries.flow.async_init("dahua_talk", context={"source": "user"})
         kq = await hass.config_entries.flow.async_configure(kq["flow_id"], {"next_step_id": "ezviz"})
         kq = await hass.config_entries.flow.async_configure(kq["flow_id"], {
-            "name": "Cam H6C", "host": "172.16.10.37", "password": "ABCDEF"})
+            "name": "Cam H6C", "host": "172.16.10.37", "password": "ABCDEF",
+            **({"hik_port": cong} if cong else {})})
     assert kq["type"] is FlowResultType.CREATE_ENTRY
     assert kq["data"]["talk_protocol"] == "hik"
+    assert kq["data"]["hik_port"] == (cong or hik_talk.CONG_HIK)
     assert kiem.call_args.args[:3] == ("172.16.10.37", "admin", "ABCDEF")
+    assert kiem.call_args.args[4] == (cong or hik_talk.CONG_HIK)
+
+
+async def test_cau_hinh_lai_ezviz_hik_doi_cong_thi_dang_nhap_lai(hass):
+    """Reconfigure: same port keeps the entry without a login; 8000 -> 8443 logs in again on 8443."""
+    from homeassistant.setup import async_setup_component
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = MockConfigEntry(domain="dahua_talk", title="DB1C", unique_id="10.0.0.9:554", data={
+        "name": "DB1C", "host": "10.0.0.9", "camera_type": "ezviz", "talk_protocol": "hik",
+        "port": 554, "username": "admin", "password": "ABCDEF", "intercom_key": "k"})
+    entry.add_to_hass(hass)
+    with mock.patch("custom_components.dahua_talk.sdk_tai.sdk_san_sang", return_value=True),             mock.patch("custom_components.dahua_talk.config_flow.check_hik_talk",
+                       return_value="AAC") as kiem,             mock.patch("custom_components.dahua_talk.async_setup_entry", return_value=True):
+        for cong, goi in ((hik_talk.CONG_HIK, 0), (8443, 1)):
+            kq = await entry.start_reconfigure_flow(hass)
+            kq = await hass.config_entries.flow.async_configure(kq["flow_id"], {
+                "host": "10.0.0.9", "hik_port": cong})
+            assert kq["reason"] == "reconfigure_successful" and kiem.call_count == goi
+    assert kiem.call_args.args[4] == 8443 and entry.data["hik_port"] == 8443
 
 
 def test_mo_phien_noi_chon_hik():
@@ -205,6 +229,10 @@ def test_mo_phien_noi_chon_hik():
     mo = _mo_phien_noi({"host": "h", "port": 554, "username": "admin", "password": "p",
                         "talk_protocol": "hik"}, "ffmpeg", "/config/hcnetsdk/lib")
     assert isinstance(mo, hik_talk.MoPhienHik) and mo.sdk_dir == "/config/hcnetsdk/lib"
+    assert mo.port == 8000                           # entries from before hik_port keep 8000
+    mo = _mo_phien_noi({"host": "h", "port": 554, "username": "admin", "password": "p",
+                        "talk_protocol": "hik", "hik_port": 8443}, "ffmpeg", "/x")
+    assert mo.port == 8443
 
 
 def test_issue2_camera_rot_mang_giua_bai_thi_bao_loi_khong_gui_tiep(gia, monkeypatch):

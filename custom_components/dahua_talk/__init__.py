@@ -36,9 +36,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAULT_RTSP_PATH,
-                    DOMAIN, HIK_SDK_DIR, TALK_HIK, TALK_RTSP)
+                    CONF_HIK_PORT, DOMAIN, HIK_SDK_DIR, TALK_HIK, TALK_RTSP)
 from .intercom import CONF_INTERCOM_KEY, IntercomView, go2rtc_source
-from .hik_talk import MoPhienHik
+from .hik_talk import CONG_HIK, MoPhienHik
 from .http_talk import MoPhienImou
 from .rtsp_intercom import MayChuBoDam, go2rtc_rtsp_source
 from .rtsp_talk import RtspTalkSession
@@ -140,7 +140,8 @@ def _mo_phien_noi(d, ffmpeg: str = "ffmpeg", sdk_dir: str = "") -> callable:
     host, user, pw = d[CONF_HOST], d[CONF_USERNAME], d[CONF_PASSWORD]
     port = int(d.get(CONF_PORT, DEFAULT_PORT))
     if d.get(CONF_TALK) == TALK_HIK:
-        return MoPhienHik(host, user, pw, sdk_dir=sdk_dir, ffmpeg=ffmpeg)
+        return MoPhienHik(host, user, pw, sdk_dir=sdk_dir, ffmpeg=ffmpeg,
+                          port=d.get(CONF_HIK_PORT, CONG_HIK))
     if d.get(CONF_TALK) == TALK_RTSP:
         path = d.get(CONF_RTSP_PATH) or DEFAULT_RTSP_PATH
         return lambda: RtspTalkSession(host, user, pw, port=port, path=path)

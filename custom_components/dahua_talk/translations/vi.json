@@ -30,7 +30,8 @@
           "host": "IP camera",
           "password": "Mật khẩu (mã xác minh 6 chữ IN HOA trên tem, hoặc mật khẩu đã đổi)",
           "mic_url": "URL mic khác (để trống = đọc thẳng luồng phụ camera)",
-          "nghe_mic": "Nghe mic camera (vệ tinh Assist, từ gọi)"
+          "nghe_mic": "Nghe mic camera (vệ tinh Assist, từ gọi)",
+          "hik_port": "Cổng HCNetSDK (8000; 8443 = SDK qua TLS, vd EZVIZ DB1C)"
         }
       },
       "onvif": {
@@ -56,7 +57,8 @@
           "username": "Tài khoản",
           "mic_url": "URL tiếng mic (không bắt buộc)",
           "password": "Mật khẩu / mã xác minh (trống = giữ cũ)",
-          "nghe_mic": "Nghe mic camera (vệ tinh Assist, từ gọi)"
+          "nghe_mic": "Nghe mic camera (vệ tinh Assist, từ gọi)",
+          "hik_port": "Cổng HCNetSDK (8000; 8443 = SDK qua TLS, vd EZVIZ DB1C)"
         }
       }
     },

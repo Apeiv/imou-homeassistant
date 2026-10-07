@@ -19,11 +19,12 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
+from homeassistant.helpers import config_validation as cv
 
 from .const import (CONF_LOAI, CONF_MIC_URL, CONF_NGHE_MIC, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT,
-                    DEFAULT_RTSP_PATH, DEFAULT_RTSP_PORT, DOMAIN, LOAI_EZVIZ, LOAI_IMOU,
+                    CONF_HIK_PORT, DEFAULT_RTSP_PATH, DEFAULT_RTSP_PORT, DOMAIN, LOAI_EZVIZ, LOAI_IMOU,
                     HIK_SDK_DIR, LOAI_ONVIF, TALK_DAHUA, TALK_HIK, TALK_RTSP)
-from .hik_talk import check_hik_talk
+from .hik_talk import CONG_HIK, check_hik_talk
 from .sdk_tai import async_dam_bao_sdk
 from .rtsp_talk import NoBackchannelError, check_rtsp_talk
 from .talk import AuthError, TalkError, check_login
@@ -55,6 +56,7 @@ def _schema(loai: str, v: dict[str, Any], *, sua: bool = False) -> vol.Schema:
     else:
         s[vol.Required(CONF_PASSWORD, default=v.get(CONF_PASSWORD, ""))] = str
     if loai == LOAI_EZVIZ:
+        s[vol.Optional(CONF_HIK_PORT, default=v.get(CONF_HIK_PORT, CONG_HIK))] = cv.port
         # EZVIZ: tick là nghe mic — URL tự dựng từ IP + mật khẩu (khỏi gõ mật khẩu vào URL,
         # khỏi quên đổi "@" thành "%40"). Ô URL chỉ để dùng nguồn khác (vd qua go2rtc).
         s[vol.Optional(CONF_NGHE_MIC, default=bool(v.get(CONF_NGHE_MIC, False)))] = bool
@@ -77,7 +79,7 @@ def url_mic_ezviz(host: str, password: str) -> str:
 def _day_du(loai: str, v: dict[str, Any], hik: bool = False) -> dict[str, Any]:
     """Điền những gì loại camera đã cố định (cách nói, cổng, tài khoản, luồng).
 
-    ``hik``: EZVIZ nói qua HCNetSDK cổng 8000 (có SDK trong /config/hcnetsdk/lib) thay vì kênh
+    ``hik``: EZVIZ nói qua HCNetSDK cổng 8000 hoặc 8443 (TLS) (có SDK trong /config/hcnetsdk/lib) thay vì kênh
     ngược RTSP — đo thật 28/09/2026: H6C không có kênh ngược, có đời EZVIZ có mà loa câm."""
     v = {**v, CONF_LOAI: loai}
     if loai == LOAI_IMOU:
@@ -88,6 +90,7 @@ def _day_du(loai: str, v: dict[str, Any], hik: bool = False) -> dict[str, Any]:
     if loai == LOAI_EZVIZ:
         v.update({CONF_USERNAME: "admin", CONF_PORT: DEFAULT_RTSP_PORT,
                   CONF_RTSP_PATH: DEFAULT_RTSP_PATH})
+        v.setdefault(CONF_HIK_PORT, CONG_HIK)                # entries from before hik_port
         # URL mic người dùng tự gõ (nguồn khác, vd qua go2rtc) thắng; không gõ mà có tick
         # "nghe mic" thì dựng từ IP + mật khẩu hiện tại (đổi mật khẩu là URL đổi theo).
         rieng = str(v.get(_MIC_RIENG) or "").strip()
@@ -115,7 +118,7 @@ def _url_mic(v: dict[str, Any]) -> str | None:
 def _ket_noi(v: dict[str, Any]) -> tuple:
     """Những gì quyết định cách nói với camera — đổi thì phải đăng nhập thử lại."""
     t = (v.get(CONF_HOST), v.get(CONF_TALK), v.get(CONF_PORT), v.get(CONF_USERNAME),
-         v.get(CONF_PASSWORD))
+         v.get(CONF_PASSWORD), v.get(CONF_HIK_PORT))
     return t + ((v.get(CONF_RTSP_PATH),) if v.get(CONF_TALK) == TALK_RTSP else ())
 
 
@@ -129,7 +132,7 @@ class DahuaTalkConfigFlow(ConfigFlow, domain=DOMAIN):
             if v[CONF_TALK] == TALK_HIK:
                 await self.hass.async_add_executor_job(
                     check_hik_talk, v[CONF_HOST], v[CONF_USERNAME], v[CONF_PASSWORD],
-                    self.hass.config.path(HIK_SDK_DIR))
+                    self.hass.config.path(HIK_SDK_DIR), v[CONF_HIK_PORT])
             elif v[CONF_TALK] == TALK_RTSP:
                 await self.hass.async_add_executor_job(
                     check_rtsp_talk, v[CONF_HOST], v[CONF_USERNAME], v[CONF_PASSWORD],

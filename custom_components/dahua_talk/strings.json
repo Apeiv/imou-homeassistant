@@ -30,7 +30,8 @@
           "host": "Camera IP",
           "password": "Password (6-capital-letter verification code on the label, or your changed password)",
           "mic_url": "Other mic URL (empty = read the camera sub stream directly)",
-          "nghe_mic": "Listen to the camera mic (Assist satellite, wake word)"
+          "nghe_mic": "Listen to the camera mic (Assist satellite, wake word)",
+          "hik_port": "HCNetSDK port (8000; 8443 = SDK over TLS, e.g. EZVIZ DB1C)"
         }
       },
       "onvif": {
@@ -56,7 +57,8 @@
           "username": "Username",
           "mic_url": "Mic audio URL (optional)",
           "password": "Password / verification code (empty = keep)",
-          "nghe_mic": "Listen to the camera mic (Assist satellite, wake word)"
+          "nghe_mic": "Listen to the camera mic (Assist satellite, wake word)",
+          "hik_port": "HCNetSDK port (8000; 8443 = SDK over TLS, e.g. EZVIZ DB1C)"
         }
       }
     },

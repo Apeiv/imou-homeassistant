@@ -13,6 +13,9 @@ TALK_RTSP = "rtsp"
 #: Hikvision / EZVIZ qua HCNetSDK cổng 8000 (thư viện người dùng chép vào /config/hcnetsdk/lib).
 TALK_HIK = "hik"
 HIK_SDK_DIR = "hcnetsdk/lib"
+#: HCNetSDK device port (default ``hik_talk.CONG_HIK`` = 8000). 8443 = SDK over TLS: newer EZVIZ
+#: firmware (e.g. DB1C) closes 8000 and only answers the SDK on 8443.
+CONF_HIK_PORT = "hik_port"
 CONF_RTSP_PATH = "rtsp_path"
 #: Loại camera chọn lúc thêm — quyết định những ô cần điền và cách nói.
 CONF_LOAI = "camera_type"

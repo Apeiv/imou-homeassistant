@@ -1,5 +1,5 @@
 /*
- * hik_noi — nói ra loa camera Hikvision / EZVIZ qua HCNetSDK (cổng thiết bị 8000).
+ * hik_noi — nói ra loa camera Hikvision / EZVIZ qua HCNetSDK (cổng thiết bị 8000, hoặc 8443 = SDK qua TLS).
  *
  * Vì sao có chương trình C này: container Home Assistant (cả HA OS) chạy Alpine (musl), không nạp
  * được HCNetSDK (dựng cho glibc). Chương trình này dựng với glibc và được chạy qua trình nạp
@@ -129,6 +129,7 @@ int main(int argc, char **argv) {
     LoginInfo li; memset(&li, 0, sizeof li);
     snprintf(li.sDeviceAddress, sizeof li.sDeviceAddress, "%s", argv[1]);
     li.wPort = (unsigned short)atoi(argv[2]);
+    li.byHttps = li.wPort == 8443;                       /* SDK over TLS, no CA check (byVerifyMode 0) */
     snprintf(li.sUserName, sizeof li.sUserName, "%s", argv[3]);
     snprintf(li.sPassword, sizeof li.sPassword, "%s", mk);
     unsigned char dev[1024];

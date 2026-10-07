@@ -153,7 +153,7 @@ async def test_form_ezviz_khong_co_o_tai_khoan_cong(hass):
     kq = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     kq = await hass.config_entries.flow.async_configure(kq["flow_id"], {"next_step_id": "ezviz"})
     o = [str(k) for k in kq["data_schema"].schema]
-    assert o == ["name", "host", "password", "nghe_mic", "mic_url"]
+    assert o == ["name", "host", "password", "hik_port", "nghe_mic", "mic_url"]
 
 
 async def test_onvif_khong_co_kenh_nguoc_bao_rieng(hass):
@@ -175,7 +175,7 @@ async def test_cau_hinh_lai_ezviz_dung_o_cua_ezviz(hass):
         "rtsp_path": "/Streaming/Channels/101", "mic_url": "", "intercom_key": KHOA})
     entry.add_to_hass(hass)
     kq = await entry.start_reconfigure_flow(hass)
-    assert [str(k) for k in kq["data_schema"].schema] == ["host", "password", "nghe_mic", "mic_url"]
+    assert [str(k) for k in kq["data_schema"].schema] == ["host", "password", "hik_port", "nghe_mic", "mic_url"]
     with mock.patch("custom_components.dahua_talk.config_flow.check_rtsp_talk") as hoi, \
             mock.patch("custom_components.dahua_talk.async_setup_entry", return_value=True):
         kq = await hass.config_entries.flow.async_configure(
