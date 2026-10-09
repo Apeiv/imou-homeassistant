@@ -58,13 +58,16 @@ speaker: media_player.front_door_speaker
 | `always_live` | no | `true` | Live video at rest too; `false` = only on ring or call |
 | `anchor` | no | `doorbell` | URL hash (`#doorbell`) that scrolls the card into view |
 | `listen_on_ring` | no | `false` | Hear the visitor as soon as it rings (Vimar card option) |
+| `language` | no | HA language | `en` or `it`; other languages fall back to English |
+| `colors` | no | theme | See [Colors](#colors) |
 
 Other Vimar card options (such as `shortcuts`) pass through.
 
 ## Colors
 
-The status pill and the ring outline use the card's own CSS variables. Unset, they follow the Home Assistant
-theme (through the Vimar card: `--warning-color`, `--primary-color`, its dark glass).
+The status pill, the ring outline and the round buttons use the card's own CSS variables. Unset, the pill
+follows the Home Assistant theme (through the Vimar card: `--warning-color`, `--primary-color`, its dark glass)
+and the buttons are light glass with dark icons.
 
 | Key | Variable | Used for | Default |
 |---|---|---|---|
@@ -73,6 +76,8 @@ theme (through the Vimar card: `--warning-color`, `--primary-color`, its dark gl
 | `on-warning` | `--db1c-on-warning` | text on the ringing pill | `#fff` |
 | `glass` | `--db1c-glass` | pill background | dark glass |
 | `ink` | `--db1c-ink` | pill text | `#fff` |
+| `button` | `--db1c-button` | round buttons' glass | light glass `rgba(255,253,247,.58)` |
+| `button-ink` | `--db1c-button-ink` | round buttons' icons | `#1b1812` |
 
 Set the variables in your theme, or per card with `colors:` (it wins over the theme). Values are any CSS
 colour, including `var(...)`. `accent` replaces the per-state dot colours with one colour:

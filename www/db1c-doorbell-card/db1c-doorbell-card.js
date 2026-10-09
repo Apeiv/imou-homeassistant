@@ -31,7 +31,8 @@
 //   ring_time: input_datetime.doorbell_last_ring  (optional)
 //   lock: lock.front_door                      (optional: Open = lock.open, with the latch; confirm_open: double tap)
 //   layout: overlay                            (+ every Vimar card key: listen_on_ring, confirm_open...)
-//   colors: { accent: ..., warning: ... }      (optional: --db1c-* colours of the status pill, see README)
+//   colors: { accent: ..., button: ... }       (optional: --db1c-* colours of the pill and the buttons, see README)
+//   language: it                               (optional: default HA's language, then English)
 //   frigate_instance / history_labels / history / ring_timeout / always_live: see DEFAULTS
 
 const VIMAR = "vimar-intercom-card";
@@ -59,12 +60,42 @@ const DEFAULTS = {
   always_live: true,                  // live video also at rest (false = only on ring/call)
   anchor: "doorbell",                 // URL hash that scrolls to the card; not the Vimar card's one
 };
-const COLORS = ["accent", "warning", "on-warning", "glass", "ink"];  // colors: keys -> --db1c-<key>
-const LABELS = { person: "Person", car: "Car", dog: "Dog", cat: "Cat" };
+const COLORS = ["accent", "warning", "on-warning", "glass", "ink", "button", "button-ink"];  // colors: keys -> --db1c-<key>
+// User-visible strings, picked by `language:` or HA's language; missing language or key = English.
+// Frigate labels are l_<label>: unknown labels show capitalised.
+const I18N = {
+  en: {
+    live: "live", rang: "rang", ringing: "ringing", on_call: "on call", connecting: "connecting…",
+    locked: "Locked", unlocked: "Unlocked", open: "Open", locking: "Locking…", unlocking: "Unlocking…", opening: "Opening…",
+    jammed: "Jammed", unavailable: "Unavailable", open_door: "Open door", confirm: "Confirm",
+    open_aria: "Open the door", open_aria_twice: "Open the door, tap twice", mute: "Mute audio", listen: "Listen",
+    talk_ring: "Talk to the visitor", ignore: "Ignore the ring", end: "End conversation",
+    back: "Live", back_aria: "Back to live video", events: "Events", events_aria: "Doorbell events", close: "Close",
+    today: "today", yesterday: "yesterday", ongoing: "ongoing", play: "play",
+    no_events: "No events recorded", history_err: "History unavailable", mic_err: "Microphone not connected",
+    video_only: "Video only: voice and microphone work on the home network.",
+    away: "video only away from home", not_live: "live stream not connected",
+    l_person: "Person", l_car: "Car", l_dog: "Dog", l_cat: "Cat", l_doorbell: "Doorbell",  // Frigate labels
+  },
+  it: {
+    live: "dal vivo", rang: "squillo", ringing: "suonano", on_call: "in linea", connecting: "collegamento…",
+    locked: "Chiusa", unlocked: "Aperta", open: "Aperta", locking: "Chiude…", unlocking: "Apre…", opening: "Apre…",
+    jammed: "Bloccata", unavailable: "Non disponibile", open_door: "Apri porta", confirm: "Conferma",
+    open_aria: "Apri la porta", open_aria_twice: "Apri la porta, tocca due volte", mute: "Silenzia l'audio", listen: "Ascolta l'audio",
+    talk_ring: "Parla con il visitatore", ignore: "Ignora lo squillo", end: "Chiudi conversazione",
+    back: "Dal vivo", back_aria: "Torna al video dal vivo", events: "Eventi", events_aria: "Eventi della porta", close: "Chiudi",
+    today: "oggi", yesterday: "ieri", ongoing: "in corso", play: "riproduci",
+    no_events: "Nessun evento registrato", history_err: "Storico non disponibile", mic_err: "Microfono non collegato",
+    video_only: "Solo video: voce e microfono funzionano in casa.",
+    away: "solo video fuori casa", not_live: "diretta non collegata",
+    l_person: "Persona", l_car: "Auto", l_dog: "Cane", l_cat: "Gatto", l_doorbell: "Campanello",  // Frigate labels
+  },
+};
+// Static texts: data-t = textContent, data-ta = aria-label; filled by _applyLang (hass, hence the language, comes later).
 const CLIP = `<video id="clipv" playsinline controls preload="none" hidden></video>
-  <button id="back" aria-label="Back to live video" hidden><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon>Live</button>`;
-const SHEET = `<dialog class="sheet" aria-label="Doorbell events"><header><span>Events</span>
-  <button class="x" aria-label="Close"><ha-icon icon="mdi:close" aria-hidden="true"></ha-icon></button></header>
+  <button id="back" data-ta="back_aria" hidden><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon><span data-t="back"></span></button>`;
+const SHEET = `<dialog class="sheet" data-ta="events_aria"><header><span data-t="events"></span>
+  <button class="x" data-ta="close"><ha-icon icon="mdi:close" aria-hidden="true"></ha-icon></button></header>
   <div class="evl"><div class="sent"></div></div><p class="evx"></p></dialog>`;
 const EXTRA_CSS = `
   #video > video { width: 100%; height: 100%; object-fit: cover; background: #000; }
@@ -121,8 +152,8 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live #log { right: 64px; }
   :host([layout="overlay"]) .live #fit { right: 12px; }
   /* Light glass (like the status pill, more transparent) in light and dark theme: dark text, fixed colours. */
-  :host([layout="overlay"]) .live { --g-ink: #1b1812; --g-acc: #1f7a6f; --g-warn: #b45309; --g-bad: #b3261e; }
-  :host([layout="overlay"]) .live :is(#log, #fit, .row button) { background: rgba(255,253,247,.58); color: var(--g-ink);
+  :host([layout="overlay"]) .live { --g-bg: var(--db1c-button, rgba(255,253,247,.58)); --g-ink: var(--db1c-button-ink, #1b1812); --g-acc: #1f7a6f; --g-warn: #b45309; --g-bad: #b3261e; }
+  :host([layout="overlay"]) .live :is(#log, #fit, .row button) { background: var(--g-bg); color: var(--g-ink);
     -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2); }
   :host([layout="overlay"]) .live[data-drawer="true"] #log { background: var(--vi-primary); }
   :host([layout="overlay"]) .live .row { bottom: 6px; height: 56px; display: flex; gap: 8px; border: 0; border-radius: 0;
@@ -131,7 +162,7 @@ const EXTRA_CSS = `
     border-radius: 22px; font-size: 14px; }
   :host([layout="overlay"]) .live .row button:not(#open) .lbl { display: none; }
   :host([layout="overlay"]) .live .row #mute { position: static; order: 2; flex: none; flex-direction: row; gap: 0; width: 40px; height: 40px;
-    margin: 0; padding: 0; align-self: center; justify-content: center; border-radius: 20px; background: rgba(255,253,247,.58); }
+    margin: 0; padding: 0; align-self: center; justify-content: center; border-radius: 20px; background: var(--g-bg); }
   :host([layout="overlay"]) .live .row #mute::after { content: none; }
   :host([layout="overlay"]) .live .row #mute[hidden] { display: none; }
   :host([layout="overlay"]) .live .row #mute ha-icon { --mdc-icon-size: 20px; }
@@ -148,16 +179,15 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live #open:is([data-lk="bad"], .bad) { color: var(--g-bad); }`;
 const mmss = (t) => { const s = Math.max(0, Math.floor((Date.now() - t) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 const ago = (t, days) => new Date(t).toDateString() === new Date(Date.now() - days * 864e5).toDateString();
-const dm = (t) => new Date(t).toLocaleDateString([], { day: "numeric", month: "short" });
-const hhmm = (t) => {  // "08:28" today, "8 Oct 08:28" other days
-  const h = new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return ago(t, 0) ? h : `${dm(t)} ${h}`;
-};
-const day = (t) => ago(t, 0) ? "today" : ago(t, 1) ? "yesterday" : dm(t);
+// T = the I18N table in use (its language in T.lang, for the dates).
+const dm = (t, T) => new Date(t).toLocaleDateString(T.lang, { day: "numeric", month: "short" });
+const hm = (t, T, sec) => new Date(t).toLocaleTimeString(T.lang, { hour: "2-digit", minute: "2-digit", ...(sec && { second: "2-digit" }) });
+const hhmm = (t, T) => ago(t, 0) ? hm(t, T) : `${dm(t, T)} ${hm(t, T)}`;  // "08:28" today, "8 Oct 08:28" other days
+const day = (t, T) => ago(t, 0) ? T.today : ago(t, 1) ? T.yesterday : dm(t, T);
 const LIVE = ["ringing", "calling", "in_call"];
 const hangUp = (pc) => { pc?.close(); pc?.sock?.close(); };  // PeerConnection + its go2rtc WebSocket
-const dur = (e) => {
-  if (!e.end_time) return "ongoing";
+const dur = (e, T) => {
+  if (!e.end_time) return T.ongoing;
   const s = Math.max(1, Math.round(e.end_time - e.start_time));
   return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
 };
@@ -243,8 +273,26 @@ customElements.whenDefined(VIMAR).then(() => {
       this._render();
     }
 
+    // The strings table: `language:` > HA's language > English (keys missing in a language: English).
+    get _t() {
+      const lang = String(this._cfg?.language || this._hass?.locale?.language || "en");  // full tag (en-GB) for the dates
+      if (this._T?.req === lang) return this._T;
+      let tag = "en";  // a malformed tag (it_IT) would make the date functions throw
+      try { tag = Intl.getCanonicalLocales(lang.replace("_", "-"))[0] || tag; } catch { /* keep en */ }
+      return (this._T = { ...I18N.en, ...I18N[tag.slice(0, 2).toLowerCase()], lang: tag, req: lang });
+    }
+
+    _applyLang() {
+      if (!this._open) return;  // not built yet
+      const T = this._t;
+      this._root.querySelectorAll("[data-t]").forEach((el) => { el.textContent = T[el.dataset.t]; });
+      this._root.querySelectorAll("[data-ta]").forEach((el) => el.setAttribute("aria-label", T[el.dataset.ta]));
+      this._open.setAttribute("aria-label", this._cfg.confirm_open ? T.open_aria_twice : T.open_aria);
+    }
+
     _render() {
       super._render();
+      this._applyLang();
       if (this._state === "ringing" && this._card.classList.contains("clip")) this._stopClip();  // the ring wins over the clip
       // always_live: the Vimar card chose "live" only for ring/call; here it holds at rest too.
       this._card.classList.toggle("live", !!this._live);
@@ -259,21 +307,22 @@ customElements.whenDefined(VIMAR).then(() => {
       this._mute.hidden = !this._v;
       this._icon(this._mute, hearing ? "mdi:volume-high" : "mdi:volume-off");
       this._mute.setAttribute("aria-pressed", hearing);
-      this._mute.setAttribute("aria-label", hearing ? "Mute audio" : "Listen");
+      const T = this._t;
+      this._mute.setAttribute("aria-label", hearing ? T.mute : T.listen);
       this._applyAudio();
-      this._talk.setAttribute("aria-label", ring ? "Talk to the visitor" : this._talk.querySelector(".lbl").textContent);
+      this._talk.setAttribute("aria-label", ring ? T.talk_ring : this._talk.querySelector(".lbl").textContent);
       this._icon(this._hangup, ring ? "mdi:bell-off" : "mdi:phone-hangup");
-      this._hangup.setAttribute("aria-label", ring ? "Ignore the ring" : "End conversation");
+      this._hangup.setAttribute("aria-label", ring ? T.ignore : T.end);
     }
 
     // "Open" shows the real lock state.
     _lockState() {
       const st = this._hass?.states[this._cfg.lock]?.state;
-      const [label, icon, lk] = {
-        locked: ["Locked", "mdi:lock", ""], unlocked: ["Unlocked", "mdi:lock-open-variant", "open"], open: ["Open", "mdi:door-open", "open"],
-        locking: ["Locking…", "mdi:lock-clock", "warn"], unlocking: ["Unlocking…", "mdi:lock-clock", "warn"], opening: ["Opening…", "mdi:lock-clock", "warn"],
-        jammed: ["Jammed", "mdi:lock-alert", "bad"], unavailable: ["Unavailable", "mdi:lock-question", "bad"],
-      }[st] || ["Open door", "mdi:lock-question", ""];
+      const T = this._t, [label, icon, lk] = {
+        locked: [T.locked, "mdi:lock", ""], unlocked: [T.unlocked, "mdi:lock-open-variant", "open"], open: [T.open, "mdi:door-open", "open"],
+        locking: [T.locking, "mdi:lock-clock", "warn"], unlocking: [T.unlocking, "mdi:lock-clock", "warn"], opening: [T.opening, "mdi:lock-clock", "warn"],
+        jammed: [T.jammed, "mdi:lock-alert", "bad"], unavailable: [T.unavailable, "mdi:lock-question", "bad"],
+      }[st] || [T.open_door, "mdi:lock-question", ""];
       const b = this._open;
       b.dataset.label = label; b.dataset.icon = icon; b.dataset.lk = lk;
       if (!this._flash) { this._icon(b, icon); this._label(b, label); }
@@ -281,7 +330,7 @@ customElements.whenDefined(VIMAR).then(() => {
 
     async _openDoor(...a) {
       const p = super._openDoor(...a);
-      if (this._armed) this._label(this._armed, "Confirm");  // first tap = armed (synchronous, before any await)
+      if (this._armed) this._label(this._armed, this._t.confirm);  // first tap = armed (synchronous, before any await)
       return p;
     }
 
@@ -295,7 +344,6 @@ customElements.whenDefined(VIMAR).then(() => {
       };
       this._root.querySelector("style").textContent += EXTRA_CSS;
       this._photo.disabled = false;  // the history loads only with the sheet open: the button does not wait for the list
-      this._open.setAttribute("aria-label", this._cfg.confirm_open ? "Open the door, tap twice" : "Open the door");
       // Fit by default (the whole door); the choice is this card's, not the Vimar card's.
       try { this._cover = localStorage.getItem(FIT_KEY) === "cover"; } catch { this._cover = false; }
       this._applyFit();
@@ -349,10 +397,11 @@ customElements.whenDefined(VIMAR).then(() => {
         clearInterval(this._lineT);
         this._lineT = this._lineAt = null;
       }
-      this._badge.textContent = s === "ringing" ? `ringing · ${mmss(this._lastRing)}`
-        : s === "in_call" ? `on call · ${mmss(this._lineAt)}`
-        : s === "calling" ? "connecting…"
-        : this._lastRing ? `rang ${hhmm(this._lastRing)}` : "live";
+      const T = this._t;
+      this._badge.textContent = s === "ringing" ? `${T.ringing} · ${mmss(this._lastRing)}`
+        : s === "in_call" ? `${T.on_call} · ${mmss(this._lineAt)}`
+        : s === "calling" ? T.connecting
+        : this._lastRing ? `${T.rang} ${hhmm(this._lastRing, T)}` : T.live;
     }
 
     // Live video: a <video> on the PeerConnection; at rest the Vimar card (picture-entity of the camera).
@@ -454,7 +503,7 @@ customElements.whenDefined(VIMAR).then(() => {
       this._retry = 0;
       this._fellBack = true;
       this._card.classList.remove("wait");
-      this._err.textContent = "Video only: voice and microphone work on the home network.";
+      this._err.textContent = this._t.video_only;
       this._setPicture(true);
       if (this._session === "calling") this._session = "in_call";
       this._probeT = setInterval(this._probe, PROBE_MS);
@@ -548,7 +597,7 @@ customElements.whenDefined(VIMAR).then(() => {
     // here only what to do with the microphone and the AudioContext created in the gesture: talk channel and ear.
     // If it throws, the Vimar card stops the microphone, closes the context and writes why.
     async _openAudio(mic, ctx) {
-      if (this._fellBack || !this._pc) throw new Error(this._fellBack ? "video only away from home" : "live stream not connected");
+      if (this._fellBack || !this._pc) throw new Error(this._fellBack ? this._t.away : this._t.not_live);
       ctx.resume().catch(() => {});  // iOS: with the microphone the audio session changes and the context may stay suspended
       // _ws = the Talk session object; the base card only checks it for truthiness. Synchronous from the check above: no races.
       // `audible` = the listen state before Talk, restored by _endMic.
@@ -610,7 +659,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const pc = new RTCPeerConnection();
       const fail = (why) => {
         if (this._ws?.pc !== pc) return;
-        this._err.textContent = `Microphone not connected: ${why}`;
+        this._err.textContent = `${this._t.mic_err}: ${why}`;
         this._stopAudio();
       };
       pc.addTransceiver(track, { direction: "sendonly" });
@@ -659,9 +708,9 @@ customElements.whenDefined(VIMAR).then(() => {
           this._evs.unshift(...fresh);
           this._evl.prepend(...items);
         }
-        this._evx.textContent = this._evs.length ? "" : "No events recorded";
+        this._evx.textContent = this._evs.length ? "" : this._t.no_events;
       } catch (e) {
-        if (n === this._histN && !this._evs.length) this._evx.textContent = `History unavailable: ${e.message || e}`;
+        if (n === this._histN && !this._evs.length) this._evx.textContent = `${this._t.history_err}: ${e.message || e}`;
       } finally {
         if (more) this._evBusy = false;
       }
@@ -672,7 +721,8 @@ customElements.whenDefined(VIMAR).then(() => {
     }
 
     _evItem(e) {
-      const b = document.createElement("button"), t = e.start_time * 1000, lbl = LABELS[e.label] || e.label;
+      const b = document.createElement("button"), t = e.start_time * 1000, T = this._t;
+      const raw = String(e.label ?? ""), lbl = T[`l_${raw}`] || raw.charAt(0).toUpperCase() + raw.slice(1);
       b.className = "ev";
       b.innerHTML = `<span class="th"><img alt="" loading="lazy"></span><span><b></b>` +
         `<small><ha-icon icon="mdi:calendar-clock" aria-hidden="true"></ha-icon><span></span></small>` +
@@ -682,9 +732,9 @@ customElements.whenDefined(VIMAR).then(() => {
       if (e.has_clip) img.insertAdjacentHTML("afterend", `<ha-icon icon="mdi:play-circle" aria-hidden="true"></ha-icon>`);
       const [when, len] = b.querySelectorAll("small span");
       b.querySelector("b").textContent = lbl;
-      when.textContent = `${day(t)} ${new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
-      len.textContent = dur(e);
-      b.setAttribute("aria-label", `${lbl}, ${when.textContent}, ${len.textContent}${e.has_clip ? ", play" : ""}`);
+      when.textContent = `${day(t, T)} ${hm(t, T, true)}`;
+      len.textContent = dur(e, T);
+      b.setAttribute("aria-label", `${lbl}, ${when.textContent}, ${len.textContent}${e.has_clip ? `, ${T.play}` : ""}`);
       b.onclick = () => this._playClip(e);
       return b;
     }
