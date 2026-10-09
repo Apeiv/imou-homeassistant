@@ -31,6 +31,7 @@
 //   ring_time: input_datetime.doorbell_last_ring  (optional)
 //   lock: lock.front_door                      (optional: Open = lock.open, with the latch; confirm_open: double tap)
 //   layout: overlay                            (+ every Vimar card key: listen_on_ring, confirm_open...)
+//   colors: { accent: ..., warning: ... }      (optional: --db1c-* colours of the status pill, see README)
 //   frigate_instance / history_labels / history / ring_timeout / always_live: see DEFAULTS
 
 const VIMAR = "vimar-intercom-card";
@@ -58,6 +59,7 @@ const DEFAULTS = {
   always_live: true,                  // live video also at rest (false = only on ring/call)
   anchor: "doorbell",                 // URL hash that scrolls to the card; not the Vimar card's one
 };
+const COLORS = ["accent", "warning", "on-warning", "glass", "ink"];  // colors: keys -> --db1c-<key>
 const LABELS = { person: "Person", car: "Car", dog: "Dog", cat: "Cat" };
 const CLIP = `<video id="clipv" playsinline controls preload="none" hidden></video>
   <button id="back" aria-label="Back to live video" hidden><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon>Live</button>`;
@@ -109,12 +111,12 @@ const EXTRA_CSS = `
   .evx { margin: 0; padding: 24px; text-align: center; color: var(--dim); }
   .evx:empty { display: none; }
   :host([layout="overlay"]) ha-card.live[data-state="ringing"]::after { content: ""; position: absolute; inset: 0; z-index: 5;
-    border-radius: inherit; box-shadow: inset 0 0 0 2px var(--vi-warn); pointer-events: none; }
+    border-radius: inherit; box-shadow: inset 0 0 0 2px var(--db1c-warning, var(--vi-warn)); pointer-events: none; }
   :host([layout="overlay"]) .live .badge { height: 44px; box-sizing: border-box; max-width: 220px; padding: 0 14px 0 12px; gap: 7px;
     border-radius: 22px; font-size: 13px; font-weight: 400; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums;
-    background: var(--vi-glass); color: #fff; }
-  :host([layout="overlay"]) .live .badge::before { background: var(--dot, var(--st)); }
-  :host([layout="overlay"]) .live[data-state="ringing"] .badge { background: var(--vi-warn); color: #fff; }
+    background: var(--db1c-glass, var(--vi-glass)); color: var(--db1c-ink, #fff); }
+  :host([layout="overlay"]) .live .badge::before { background: var(--db1c-accent, var(--dot, var(--st))); }
+  :host([layout="overlay"]) .live[data-state="ringing"] .badge { background: var(--db1c-warning, var(--vi-warn)); color: var(--db1c-on-warning, #fff); }
   :host([layout="overlay"]) .live[data-state="ringing"] .badge::before { background: currentColor; animation: blink 1s ease-in-out infinite; }
   :host([layout="overlay"]) .live #log { right: 64px; }
   :host([layout="overlay"]) .live #fit { right: 12px; }
@@ -176,6 +178,12 @@ customElements.whenDefined(VIMAR).then(() => {
       const missing = REQUIRED.filter((k) => !config?.[k]);
       if (missing.length) throw new Error(`db1c-doorbell-card: missing required option(s): ${missing.join(", ")}`);
       super.setConfig({ ...DEFAULTS, ...config, status: STATUS, last_ring: LAST });
+      // colors: { accent: "var(--my-accent)" } -> --db1c-accent on the host (inherited by the shadow DOM)
+      for (const k of COLORS) {
+        const v = config.colors?.[k];
+        if (v == null) this.style.removeProperty(`--db1c-${k}`);
+        else this.style.setProperty(`--db1c-${k}`, String(v));
+      }
     }
 
     set hass(h) {

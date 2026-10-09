@@ -61,6 +61,30 @@ speaker: media_player.front_door_speaker
 
 Other Vimar card options (such as `shortcuts`) pass through.
 
+## Colors
+
+The status pill and the ring outline use the card's own CSS variables. Unset, they follow the Home Assistant
+theme (through the Vimar card: `--warning-color`, `--primary-color`, its dark glass).
+
+| Key | Variable | Used for | Default |
+|---|---|---|---|
+| `accent` | `--db1c-accent` | status dot | state colour (`--primary-color` at rest) |
+| `warning` | `--db1c-warning` | ringing pill and outline | `--warning-color` |
+| `on-warning` | `--db1c-on-warning` | text on the ringing pill | `#fff` |
+| `glass` | `--db1c-glass` | pill background | dark glass |
+| `ink` | `--db1c-ink` | pill text | `#fff` |
+
+Set the variables in your theme, or per card with `colors:` (it wins over the theme). Values are any CSS
+colour, including `var(...)`. `accent` replaces the per-state dot colours with one colour:
+
+```yaml
+colors:
+  accent: var(--accent-color)
+  warning: "#e69500"
+  glass: rgba(255, 255, 255, 0.85)
+  ink: var(--primary-text-color)
+```
+
 ## Notes
 
 - dahua_talk closes the talk channel after 3 minutes of each Talk session.
