@@ -153,3 +153,49 @@ async def test_ha_url_cho_go2rtc_o_may_khac(hass):
             await hass.services.async_call(DOMAIN, "get_intercom_source",
                                            {"entity_id": mp, "ha_url": sai},
                                            blocking=True, return_response=True)
+
+
+async def test_hai_chieu_mo_ngay_va_khong_dong_khi_im(hass):
+    """HCNetSDK đưa tiếng camera về: kênh mở từ khúc đầu (dù im) và giữ suốt phiên — không VOX."""
+    loa = LoaGia()
+    loa.hai_chieu = True
+    ic = intercom.Intercom(hass, loa)
+    _day(ic, _im(intercom.IM_GIAY + 1) + _song(0.5, -20) + _im(intercom.IM_GIAY + 1))
+    assert ic._hang is not None                      # vẫn mở sau quãng im dài
+    await ic.async_close()
+    assert len(loa.phien) == 1 and len(loa.phien[0]) == (2 * (intercom.IM_GIAY + 1) + 0.5) * 16000
+
+
+async def test_nghe_phat_tieng_camera_cho_the(hass, hass_client):
+    """Chỉ camera HCNetSDK có tiếng về: mục Dahua trả 404; thẻ ngắt lúc camera im → bỏ đăng ký ngay."""
+    from homeassistant.helpers import entity_registry as er
+
+    def _mp(muc):
+        return next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
+                    if e.domain == "media_player")
+
+    dahua = _muc()
+    await _nap(hass, dahua)
+    client = await hass_client()
+    assert (await client.get(f"/api/dahua_talk/listen/{_mp(dahua)}")).status == 404
+    assert (await client.get("/api/dahua_talk/listen/media_player.khong_co")).status == 404
+    muc = MockConfigEntry(domain=DOMAIN, title="Cam hik", data={
+        "name": "Cam hik", "host": "192.168.1.66", "port": 554, "username": "admin", "password": "mk",
+        "mic_url": "", "talk_protocol": "hik", "hik_port": 8443})
+    muc.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(muc.entry_id)
+    await hass.async_block_till_done()
+    r = await client.get(f"/api/dahua_talk/listen/{_mp(muc)}")
+    assert r.status == 200
+    nghe = muc.runtime_data.mic_camera
+    await asyncio.sleep(0)
+    assert muc.runtime_data.speaker.hai_chieu            # có người nghe → bộ đàm giữ kênh mở
+    nghe.feed(b"\x01\x02" * 160)                    # từ luồng ffmpeg
+    await asyncio.sleep(0)
+    assert await r.content.readexactly(320) == b"\x01\x02" * 160
+    r.close()
+    for _ in range(50):                             # thẻ ngắt lúc camera im → bỏ đăng ký, không chờ khúc sau
+        if not nghe.nguoi_nghe:
+            break
+        await asyncio.sleep(0.02)
+    assert not nghe.nguoi_nghe and not muc.runtime_data.speaker.hai_chieu

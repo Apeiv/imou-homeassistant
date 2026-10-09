@@ -32,12 +32,11 @@ from homeassistant.core import (Event, HomeAssistant, ServiceCall, ServiceRespon
                                 SupportsResponse, callback)
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAULT_RTSP_PATH,
                     CONF_HIK_PORT, DOMAIN, HIK_SDK_DIR, TALK_HIK, TALK_RTSP)
-from .intercom import CONF_INTERCOM_KEY, IntercomView, go2rtc_source
+from .intercom import CONF_INTERCOM_KEY, IntercomView, Nghe, NgheView, go2rtc_source, muc_theo_entity
 from .hik_talk import CONG_HIK, MoPhienHik
 from .http_talk import MoPhienImou
 from .rtsp_intercom import MayChuBoDam, go2rtc_rtsp_source
@@ -65,6 +64,8 @@ class DahuaTalkData:
     #: #3 (29/09/2026): EZVIZ qua HCNetSDK mở mic lại khi loa còn phát → đuôi câu trả lời lọt vào mic, vệ tinh tự đánh
     #: thức 9 lần trong 6 phút. Mặc định theo đường nói (``che_mic_mac_dinh``), chỉnh từng camera bằng ô số.
     che_mic_giay: float = 0.5
+    #: Tiếng mic camera về trong lúc nói (chỉ HCNetSDK gửi) → ``NgheView`` cho thẻ.
+    mic_camera: Nghe | None = None
     _nghe_doi: list = field(default_factory=list)
     _nghe_tang: list = field(default_factory=list)
 
@@ -98,6 +99,7 @@ type DahuaTalkConfigEntry = ConfigEntry[DahuaTalkData]
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(IntercomView())
+    hass.http.register_view(NgheView())
     may_chu = MayChuBoDam(hass)
     if await may_chu.async_start():
         async def _dung(_e: Event) -> None:
@@ -106,9 +108,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def _nguon_bo_dam(call: ServiceCall) -> ServiceResponse:
         entity_id = call.data["entity_id"]
-        rec = er.async_get(hass).async_get(entity_id)
-        entry = hass.config_entries.async_get_entry(rec.config_entry_id) if rec else None
-        if entry is None or entry.domain != DOMAIN:
+        entry = muc_theo_entity(hass, entity_id)
+        if entry is None:
             raise ServiceValidationError(f"{entity_id} is not an Assist Camera entity")
         key, ha_url = entry.data[CONF_INTERCOM_KEY], call.data.get("ha_url", "")
         exec_16 = go2rtc_source(hass, entry.entry_id, key, ha_url)
@@ -132,16 +133,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-def _mo_phien_noi(d, ffmpeg: str = "ffmpeg", sdk_dir: str = "") -> callable:
+def _mo_phien_noi(d, ffmpeg: str = "ffmpeg", sdk_dir: str = "", nghe: Nghe | None = None) -> callable:
     """Hàm mở một phiên nói theo cách camera hỗ trợ (mục cũ không có khoá này là Dahua).
 
     Imou/Dahua: cổng 8086 (AAC 16 kHz, rõ hơn) trước, 37777 (PCM 8 kHz) dự phòng.
-    EZVIZ / Hikvision không có kênh ngược dùng được: HCNetSDK cổng 8000."""
+    EZVIZ / Hikvision không có kênh ngược dùng được: HCNetSDK cổng 8000 — đường duy nhất đưa tiếng
+    camera về trong lúc nói (``nghe``: đàm thoại hai chiều)."""
     host, user, pw = d[CONF_HOST], d[CONF_USERNAME], d[CONF_PASSWORD]
     port = int(d.get(CONF_PORT, DEFAULT_PORT))
     if d.get(CONF_TALK) == TALK_HIK:
         return MoPhienHik(host, user, pw, sdk_dir=sdk_dir, ffmpeg=ffmpeg,
-                          port=d.get(CONF_HIK_PORT, CONG_HIK))
+                          port=d.get(CONF_HIK_PORT, CONG_HIK), nghe=nghe)
     if d.get(CONF_TALK) == TALK_RTSP:
         path = d.get(CONF_RTSP_PATH) or DEFAULT_RTSP_PATH
         return lambda: RtspTalkSession(host, user, pw, port=port, path=path)
@@ -161,11 +163,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_INTERCOM_KEY: secrets.token_urlsafe(24)})
     d = entry.data
+    nghe = Nghe(hass) if d.get(CONF_TALK) == TALK_HIK else None     # chỉ HCNetSDK đưa tiếng camera về
     entry.runtime_data = DahuaTalkData(
         speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary,
-                                            hass.config.path(HIK_SDK_DIR))),
+                                            hass.config.path(HIK_SDK_DIR), nghe)),
         mic_url=str(d.get(CONF_MIC_URL) or ""),
         che_mic_giay=che_mic_mac_dinh(d),
+        mic_camera=nghe,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -174,5 +178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
 async def async_unload_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) -> bool:
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
+        if entry.runtime_data.mic_camera:
+            entry.runtime_data.mic_camera.close()
         await entry.runtime_data.speaker.async_close()
     return ok

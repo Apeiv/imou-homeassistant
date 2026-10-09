@@ -100,6 +100,12 @@ class Speaker:
         """Tần số phiên sắp mở — nguồn tiếng nên sinh đúng tần số này (khỏi đổi hai lần)."""
         return int(getattr(self._mo_phien, "tan_so", TAN_SO))
 
+    @property
+    def hai_chieu(self) -> bool:
+        """Đường nói đưa tiếng camera về trong lúc kênh mở (HCNetSDK) VÀ đang có thẻ nghe: bộ đàm giữ kênh mở suốt
+        lượt. Đọc từng khúc — không ai nghe nữa thì VOX trở lại."""
+        return bool(getattr(self._mo_phien, "hai_chieu", False))
+
     def _phien(self, hang: "queue.Queue", vao: int, song: bool = False,
                huy: threading.Event | None = None) -> float:
         """Luồng executor: mở kênh nói, rút PCM ``vao`` Hz từ hàng đợi, đổi sang tần số của

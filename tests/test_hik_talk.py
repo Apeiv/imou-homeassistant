@@ -11,6 +11,7 @@ import struct
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -48,6 +49,8 @@ while len(d := sys.stdin.buffer.read(4)) == 4:
             os.environ["HIK_BAN_CON"] = str(ban - 1)
             bao.write("LOI camera không mở kênh đàm thoại (mã 29)\\n"); continue
         mo, n_khung = True, 0; bao.write("OK\\n")
+        if fd := os.environ.get("HIK_NGHE_FD"):                 # camera nói lại: 3 khung mic về
+            os.write(int(fd), {ADTS!r} * 3)
     elif n == 0:
         if mo: nhat_ky.write(f"luot {{n_khung}}\\n")
         mo = False; bao.write("DONG\\n")
@@ -63,6 +66,10 @@ nhat_ky.write("dang_xuat\\n")
 """)
     ffmpeg = _tep(tmp_path / "ffmpeg", f"""
 import sys
+if sys.argv[sys.argv.index("-f") + 1] != "s16le":           # giải mã (nghe): mỗi khung ADTS → 320 byte PCM
+    while d := sys.stdin.buffer.read({len(ADTS)}):
+        sys.stdout.buffer.write(b"\\x01\\x00" * 160); sys.stdout.buffer.flush()
+    sys.exit()
 while d := sys.stdin.buffer.read(2048):
     sys.stdout.buffer.write({ADTS!r}); sys.stdout.buffer.flush()
 """)
@@ -247,4 +254,31 @@ def test_issue2_camera_rot_mang_giua_bai_thi_bao_loi_khong_gui_tiep(gia, monkeyp
             for _ in range(30):                           # 30 giây tiếng nếu không ai chặn
                 s.send_pcm(b"\x00\x01" * 16000)
     assert time.monotonic() - t0 < 8
+    mo.close()
+
+
+def test_hai_chieu_tieng_mic_camera_ve_qua_nghe(gia):
+    """Đàm thoại hai chiều: khung SDK đưa về (HIK_NGHE_FD) → ffmpeg giải mã → ``nghe`` nhận PCM; không ``nghe`` thì
+    không mở fd, không ffmpeg giải mã."""
+    ffmpeg, _ghi = gia
+    ve = []
+    nghe = SimpleNamespace(feed=ve.append, nguoi_nghe=set())      # như intercom.Nghe
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg, nghe=nghe)
+    assert not mo.hai_chieu                               # chưa ai nghe: VOX như cũ
+    nghe.nguoi_nghe.add(1)
+    assert mo.hai_chieu
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    het = time.monotonic() + 3
+    while sum(map(len, ve)) < 3 * 320 and time.monotonic() < het:
+        time.sleep(0.05)
+    assert b"".join(ve) == b"\x01\x00" * 160 * 3
+    ff = mo._tg._ff_nghe
+    mo.close()
+    assert ff.wait(3) is not None                         # bộ giải mã thoát cùng chương trình trợ giúp
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    assert not mo.hai_chieu
+    with mo() as s:
+        s.send_pcm(b"\x00\x01" * 2048)
+    assert mo._tg._ff_nghe is None
     mo.close()

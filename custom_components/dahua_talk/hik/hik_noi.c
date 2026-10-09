@@ -9,6 +9,8 @@
  * Giao thức với tích hợp:
  *   env HIK_LIB = thư mục lib của HCNetSDK, HIK_MK = mật khẩu (mã xác minh EZVIZ),
  *       HIK_NGHI = ngồi yên (kênh đóng) ngần này giây thì đăng xuất và thoát (mặc định 60)
+ *       HIK_NGHE_FD = fd nhận tiếng MIC CAMERA mà SDK đưa về trong lúc kênh đàm thoại mở (khung mã hoá
+ *       nguyên như camera gửi: AAC ADTS hay G.711, cùng mã với chiều nói); không đặt thì bỏ tiếng ấy
  *   kênh báo (fd trong HIK_BAO_FD, mặc định 3), mỗi dòng một tin:
  *       "SAN <mã> <tần_số>" đăng nhập xong  |  "OK" kênh đã mở  |  "DONG" kênh đã đóng
  *       "LOI <thông điệp>" hỏng (sau LOI lúc đăng nhập thì chương trình thoát; LOI GIỮA LƯỢT — gửi tiếng hỏng
@@ -28,7 +30,9 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,8 +75,12 @@ static void ngoai_le(unsigned loai, int uid, int h, void *u) {
     if (loai == EXCEPTION_AUDIOEXCHANGE) kenh_hong = h;
 }
 
-static void bo_mic(int h, char *b, unsigned n, unsigned char f, void *u) {
-    (void)h; (void)b; (void)n; (void)f; (void)u;           /* bỏ tiếng mic camera gửi về */
+/* Tiếng mic camera về trong lúc kênh mở (đàm thoại hai chiều): chép ra HIK_NGHE_FD. fd không chặn —
+ * bên đọc chậm thì mất khung (hay khung bị cắt dở: ffmpeg tự bắt lại đầu khung ADTS) chứ luồng SDK không treo. */
+static int nghe_fd = -1;
+static void nghe_mic(int h, char *b, unsigned n, unsigned char f, void *u) {
+    (void)h; (void)f; (void)u;
+    if (nghe_fd >= 0 && n) { ssize_t r = write(nghe_fd, b, n); (void)r; }
 }
 
 static int doc_du(unsigned char *buf, size_t n) {
@@ -103,9 +111,12 @@ int main(int argc, char **argv) {
     bao = fdopen(fd_bao ? atoi(fd_bao) : 3, "w");
     if (!bao) return 9;
     setvbuf(bao, NULL, _IOLBF, 0);
+    signal(SIGPIPE, SIG_IGN);                            /* ffmpeg nghe chết thì write() trả EPIPE, không giết ta */
     if (argc < 4) { fprintf(bao, "LOI thiếu tham số\n"); return 1; }
     const char *lib = getenv("HIK_LIB"), *mk = getenv("HIK_MK");
     if (!lib || !mk) { fprintf(bao, "LOI thiếu HIK_LIB / HIK_MK\n"); return 1; }
+    const char *fd_nghe = getenv("HIK_NGHE_FD");
+    if (fd_nghe) { nghe_fd = atoi(fd_nghe); fcntl(nghe_fd, F_SETFL, fcntl(nghe_fd, F_GETFL) | O_NONBLOCK); }
     char duong[1024];
     const char *truoc[] = {"libcrypto.so.1.1", "libssl.so.1.1", "libhpr.so", "libHCCore.so"};
     for (int i = 0; i < 4; i++) {
@@ -165,7 +176,7 @@ int main(int argc, char **argv) {
         if (!doc_du(dau, 4)) break;
         uint32_t n = ((uint32_t)dau[0] << 24) | ((uint32_t)dau[1] << 16) | ((uint32_t)dau[2] << 8) | dau[3];
         if (n == 0xFFFFFFFFu) {                            /* mở kênh */
-            if (h < 0) { kenh_hong = -1; h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, bo_mic, NULL); }
+            if (h < 0) { kenh_hong = -1; h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, nghe_mic, NULL); }
             if (h < 0) fprintf(bao, "LOI camera không mở kênh đàm thoại (mã %u)\n", NET_DVR_GetLastError());
             else fprintf(bao, "OK\n");
             t0 = -1; da_phat = 0;

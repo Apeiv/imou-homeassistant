@@ -7,7 +7,9 @@ camera qua ``Speaker`` — dùng chung khoá phiên với TTS và thông báo.
 
 Kênh nói chỉ mở KHI CÓ TIẾNG NGƯỜI và đóng sau một quãng im: camera tự tắt mic
 của nó suốt lúc kênh nói mở, mà trình duyệt gửi tiếng liên tục suốt lúc thẻ còn
-mở — mở kênh suốt thì không bao giờ nghe được người bên camera trả lời.
+mở — mở kênh suốt thì không bao giờ nghe được người bên camera trả lời. Trừ đường HCNetSDK có
+``nghe`` (đàm thoại HAI CHIỀU): tiếng mic camera về ngay trên kênh đàm thoại (``Nghe`` → ``NgheView``
+cho thẻ), nên kênh mở suốt lượt bộ đàm, không VOX.
 
 go2rtc không gửi được header ``Authorization`` từ lệnh exec, nên đường POST dùng
 khoá ngẫu nhiên riêng từng camera trong URL; khoá chỉ phát được tiếng ra loa của
@@ -27,7 +29,9 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .speaker import NGUONG_IM_DB, muc_db
@@ -45,6 +49,8 @@ NGUONG_DB = NGUONG_IM_DB
 IM_GIAY = 1.5
 #: Giữ ngần này giây tiếng ngay trước lúc có tiếng — khỏi mất âm đầu câu.
 DEM_GIAY = 0.3
+#: Loa hỏng (camera từ chối kênh, chương trình trợ giúp chết): chờ ngần này giây rồi mới mở lại (kênh hai chiều).
+_CHO_LOI = 2.0
 
 #: Cờ bắt buộc cho ffmpeg đọc ống dẫn theo luồng: thiếu chúng, ffmpeg gom tiếng để
 #: dò định dạng rồi mới nhả — đo 24/09/2026: 2,5 giây vào mà 0 byte ra.
@@ -76,6 +82,7 @@ class Intercom:
     def __init__(self, hass: HomeAssistant, speaker: "Speaker", tan_so: int = TAN_SO) -> None:
         self.hass, self.speaker, self.tan_so = hass, speaker, tan_so
         self.seconds = 0.0            # tổng số giây đã phát ra loa
+        self._loi_luc = -1e9          # lúc loa hỏng gần nhất: chờ ``_CHO_LOI`` giây rồi mới mở lại
         self._hang: asyncio.Queue[bytes | None] | None = None
         self._viec: list[asyncio.Task] = []
         self._dem: list[tuple[float, bytes]] = []     # (lúc tới, PCM) ngay trước tiếng người
@@ -91,6 +98,9 @@ class Intercom:
                                                               song=True)
         except Exception as exc:  # noqa: BLE001 — loa hỏng một lượt không được giết cả phiên
             _LOGGER.warning("intercom: cannot play to camera: %s", exc)
+            self._loi_luc = time.monotonic()
+            if self._hang is hang:    # kênh mở suốt (hai chiều): không ai đọc nữa → đóng, lượt sau mở lại
+                self.stop_talking()
             # Nguồn còn đang đợi thì rút cạn để khỏi treo người đẩy.
             while not hang.empty():
                 hang.get_nowait()
@@ -100,7 +110,10 @@ class Intercom:
         if not pcm:
             return
         luc = time.monotonic()
-        co_tieng = muc_db(pcm) > NGUONG_DB
+        # Đàm thoại hai chiều (HCNetSDK, có thẻ đang nghe ``NgheView``): kênh mở từ khúc đầu và giữ suốt — tiếng
+        # camera về qua kênh đàm thoại, không cần đóng để nghe. Không ai nghe thì VOX như cũ. Xét từng khúc.
+        hai_chieu = getattr(self.speaker, "hai_chieu", False) and luc - self._loi_luc > _CHO_LOI
+        co_tieng = hai_chieu or muc_db(pcm) > NGUONG_DB
         self._im = 0.0 if co_tieng else self._im + len(pcm) / (2 * self.tan_so)
         if self._hang is None:
             if not co_tieng:
@@ -157,6 +170,65 @@ class IntercomView(HomeAssistantView):
 
 
 CONF_INTERCOM_KEY = "intercom_key"
+
+
+def muc_theo_entity(hass: HomeAssistant, entity_id: str) -> ConfigEntry | None:
+    """Mục cấu hình của tích hợp mà ``entity_id`` thuộc về; không phải của tích hợp này thì None."""
+    rec = er.async_get(hass).async_get(entity_id)
+    entry = hass.config_entries.async_get_entry(rec.config_entry_id) if rec else None
+    return entry if entry is not None and entry.domain == DOMAIN else None
+
+
+class Nghe:
+    """Tiếng MIC CAMERA về trong lúc kênh đàm thoại mở (HCNetSDK ``nghe``): phát cho mọi trình duyệt đang
+    nghe qua ``NgheView``. ``feed`` gọi từ luồng bất kỳ; mỗi người nghe một hàng đợi."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+        self.nguoi_nghe: set[asyncio.Queue[bytes | None]] = set()   # None = hết (gỡ mục)
+        self.da_co = False             # log một lần: camera có gửi tiếng về hay không
+
+    def feed(self, pcm: bytes) -> None:
+        self.hass.loop.call_soon_threadsafe(self._phat, pcm)
+
+    def _phat(self, pcm: bytes | None) -> None:
+        if pcm and not self.da_co:
+            self.da_co = True
+            _LOGGER.debug("listen: audio from the camera is flowing")
+        for hang in self.nguoi_nghe:
+            if hang.qsize() < 50:      # người nghe chết lặng: bỏ khúc, không tích vô hạn
+                hang.put_nowait(pcm)
+
+    def close(self) -> None:
+        """Gỡ mục: thả mọi người đang nghe."""
+        self._phat(None)
+
+
+class NgheView(HomeAssistantView):
+    """Thẻ GET (token HA) → luồng PCM16 LE mono ``TAN_SO`` Hz tiếng camera trong lúc nói, tới khi thẻ ngắt."""
+
+    url = "/api/dahua_talk/listen/{entity_id}"
+    name = "api:dahua_talk:listen"
+
+    async def get(self, request: web.Request, entity_id: str) -> web.StreamResponse:
+        hass: HomeAssistant = request.app["hass"]
+        entry = muc_theo_entity(hass, entity_id)
+        nghe = getattr(getattr(entry, "runtime_data", None), "mic_camera", None)
+        if nghe is None:
+            return web.Response(status=404)
+        resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Cache-Control": "no-store"})
+        await resp.prepare(request)
+        hang: asyncio.Queue[bytes | None] = asyncio.Queue()
+        nghe.nguoi_nghe.add(hang)
+        # Thẻ ngắt (thôi nói): HA huỷ handler (handler_cancellation) hay ``write`` báo lỗi — đều qua ``finally``.
+        try:
+            while (pcm := await hang.get()) is not None:
+                await resp.write(pcm)
+        except ConnectionResetError:
+            pass
+        finally:
+            nghe.nguoi_nghe.discard(hang)
+        return resp
 
 
 def go2rtc_source(hass: HomeAssistant, entry_id: str, key: str, ha_url: str = "") -> str:

@@ -23,6 +23,7 @@ nhập lại mỗi lượt thì tiếng bộ đàm dồn hàng đợi suốt lú
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import re
@@ -31,10 +32,13 @@ import struct
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .http_talk import cat_adts
-from .talk import AuthError, TalkError
+from .talk import TAN_SO, AuthError, TalkError
+
+_LOGGER = logging.getLogger(__name__)
 
 CONG_HIK = 8000
 _THU_MUC = Path(__file__).parent / "hik"
@@ -49,7 +53,15 @@ NGHI_GIAY = 60
 _BIEN_NGHI = 5.0
 #: Camera vừa đóng kênh thì chờ nó nhả kênh tối đa ngần này giây trước khi báo hỏng.
 _CHO_NHA_KENH = 3.0
+#: ffmpeg đọc / ghi ống dẫn theo luồng, không gom để dò định dạng (xem ``intercom._FFMPEG_TRUC_TIEP``).
+_FF_TRUC_TIEP = ["-hide_banner", "-loglevel", "error", "-probesize", "32", "-analyzeduration", "0",
+                 "-fflags", "nobuffer"]
 _MO_KENH = struct.pack(">I", 0xFFFFFFFF)
+
+
+def _dinh_dang(ma: str) -> str:
+    """Tên định dạng ffmpeg của mã camera đòi (``SAN <mã>``): aac (ADTS) / mulaw / alaw."""
+    return "aac" if ma == "AAC" else "mulaw" if ma == "G711U" else "alaw"
 _DONG_KENH = struct.pack(">I", 0)
 
 
@@ -84,20 +96,28 @@ class TroGiup:
     Dựng xong là đã đăng nhập (``ma``, ``tan_so`` = mã và tần số camera đòi); đăng nhập hỏng
     thì ném ``AuthError`` / ``TalkError``."""
 
-    def __init__(self, host: str, port: int, username: str, password: str, sdk_dir: str) -> None:
+    def __init__(self, host: str, port: int, username: str, password: str, sdk_dir: str, *,
+                 nghe: Callable[[bytes], None] | None = None, ffmpeg: str = "ffmpeg") -> None:
         r, w = os.pipe()
+        # ``nghe``: nhận PCM16 mono ``TAN_SO`` Hz tiếng MIC CAMERA trong lúc kênh đàm thoại mở (đàm thoại hai
+        # chiều) — SDK đưa khung mã hoá về qua HIK_NGHE_FD, ffmpeg giải mã, luồng riêng gọi ``nghe`` từng khúc.
+        nghe_r, nghe_w = os.pipe() if nghe else (-1, -1)
         env = {**os.environ, "HIK_LIB": sdk_dir, "HIK_MK": password, "HIK_BAO_FD": str(w),
-               "HIK_NGHI": str(NGHI_GIAY)}
-        self._bao, self._du = r, b""
+               "HIK_NGHI": str(NGHI_GIAY), **({"HIK_NGHE_FD": str(nghe_w)} if nghe else {})}
+        self._bao, self._du, self._nghe_r, self._ff_nghe = r, b"", nghe_r, None
         try:
             self.p = subprocess.Popen(
                 _lenh(host, port, username, sdk_dir), stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, pass_fds=(w,))
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                pass_fds=(w, nghe_w) if nghe else (w,))
         except BaseException:
             os.close(r)
+            self._dong_nghe()
             raise
         finally:
             os.close(w)
+            if nghe_w >= 0:
+                os.close(nghe_w)
         #: ``time.monotonic()`` lúc kênh đóng lần gần nhất (mốc tính ngồi yên).
         self.ranh_tu = time.monotonic()
         # Thu dọn ngay khi nó tự thoát vì ngồi yên (issue #2: camera lâu không nói để lại tiến trình <defunct>).
@@ -111,6 +131,34 @@ class TroGiup:
             raise TalkError(dong or "HCNetSDK helper did not answer")
         _san, self.ma, tan_so = dong.split()[:3]
         self.tan_so = int(tan_so)
+        if nghe:
+            try:
+                self._mo_nghe(nghe, ffmpeg)
+            except BaseException:
+                self.close()
+                raise
+
+    def _mo_nghe(self, nghe: Callable[[bytes], None], ffmpeg: str) -> None:
+        """Khung mã hoá từ HIK_NGHE_FD → ffmpeg (đọc thẳng ống dẫn) → PCM16 mono ``TAN_SO`` Hz → ``nghe``."""
+        # ponytail: 8 kHz cố định — thẻ phát lại bằng bộ phát G.711 của card Vimar; đổi khi cần băng rộng.
+        ff = subprocess.Popen(
+            [ffmpeg, *_FF_TRUC_TIEP, "-f", _dinh_dang(self.ma), "-i", "pipe:0",
+             "-f", "s16le", "-ar", str(TAN_SO), "-ac", "1", "-flush_packets", "1", "pipe:1"],
+            stdin=self._nghe_r, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._dong_nghe()                            # ffmpeg giữ đầu đọc; hết chương trình trợ giúp là hết ống
+
+        def chep() -> None:
+            while khuc := ff.stdout.read1(4096):
+                nghe(khuc)
+            _LOGGER.debug("listen decoder exited %s", ff.wait())
+
+        threading.Thread(target=chep, name="dahua-talk-hik-nghe", daemon=True).start()
+        self._ff_nghe = ff
+
+    def _dong_nghe(self) -> None:
+        if self._nghe_r >= 0:
+            os.close(self._nghe_r)
+            self._nghe_r = -1
 
     def _doc(self, cho: float) -> str:
         """Một dòng từ kênh báo; hết giờ hoặc chương trình đã thoát thì trả ""."""
@@ -196,6 +244,10 @@ class TroGiup:
         if self._bao >= 0:
             os.close(self._bao)
             self._bao = -1
+        self._dong_nghe()
+        if self._ff_nghe is not None:                # luồng ``chep`` thu dọn (wait) sau khi nó thoát
+            self._ff_nghe.kill()
+            self._ff_nghe = None
 
 
 class HikTalkSession:
@@ -215,11 +267,9 @@ class HikTalkSession:
     def __enter__(self) -> HikTalkSession:
         # ffmpeg khởi động song song với lúc camera mở kênh (mã đã biết từ lúc đăng nhập).
         ra = (["-c:a", "aac", "-b:a", "32k", "-f", "adts"] if self.ma == "AAC" else
-              ["-c:a", "pcm_mulaw" if self.ma == "G711U" else "pcm_alaw",
-               "-f", "mulaw" if self.ma == "G711U" else "alaw"])
+              ["-c:a", "pcm_" + _dinh_dang(self.ma), "-f", _dinh_dang(self.ma)])
         self._ff = subprocess.Popen(
-            [self.ffmpeg, "-hide_banner", "-loglevel", "error",
-             "-probesize", "32", "-analyzeduration", "0", "-fflags", "nobuffer",
+            [self.ffmpeg, *_FF_TRUC_TIEP,
              "-f", "s16le", "-ar", str(self.tan_so), "-ac", "1", "-i", "pipe:0",
              *ra, "-flush_packets", "1", "pipe:1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -322,12 +372,19 @@ class MoPhienHik:
     giữa các lượt. ``tan_so`` = tần số camera báo (mặc định 16 kHz như H6C trước lần đầu)."""
 
     def __init__(self, host: str, username: str, password: str, *, sdk_dir: str,
-                 ffmpeg: str = "ffmpeg", port: int = CONG_HIK) -> None:
+                 ffmpeg: str = "ffmpeg", port: int = CONG_HIK, nghe=None) -> None:
         self.host, self.username, self.password = host, username, password
         self.sdk_dir, self.ffmpeg, self.port = sdk_dir, ffmpeg, port
+        #: ``intercom.Nghe`` (``feed(pcm)`` + ``nguoi_nghe``): tiếng mic camera về trong lúc kênh mở đi đâu.
+        self.nghe = nghe
         self.tan_so = 16000                          # EZVIZ H6C báo AAC 16 kHz
         self._tg: TroGiup | None = None
         self._khoa = threading.Lock()
+
+    @property
+    def hai_chieu(self) -> bool:
+        """Đang có thẻ nghe tiếng camera về → bộ đàm giữ kênh mở suốt lượt (không VOX)."""
+        return bool(self.nghe is not None and self.nghe.nguoi_nghe)
 
     def __call__(self) -> _PhienHik:
         return _PhienHik(self)
@@ -336,7 +393,8 @@ class MoPhienHik:
         if self._tg is not None and not self._tg.dung_lai_duoc():
             self.close()
         if self._tg is None:
-            self._tg = TroGiup(self.host, self.port, self.username, self.password, self.sdk_dir)
+            self._tg = TroGiup(self.host, self.port, self.username, self.password, self.sdk_dir,
+                               nghe=self.nghe.feed if self.nghe else None, ffmpeg=self.ffmpeg)
             self.tan_so = self._tg.tan_so            # lần sau loa sinh tiếng đúng tần số này
         return self._tg
 
