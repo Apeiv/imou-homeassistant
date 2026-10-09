@@ -232,12 +232,12 @@ class NgheView(HomeAssistantView):
         if nghe is None or nghe.da_dong:
             return web.Response(status=404)
         resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Cache-Control": "no-store"})
-        await resp.prepare(request)
         hang: asyncio.Queue[bytes | None] = asyncio.Queue()
-        nghe.nguoi_nghe.add(hang)
+        nghe.nguoi_nghe.add(hang)                    # trước ``await``: gỡ mục lúc ấy vẫn thả được hàng này
         dau = True
         # Thẻ ngắt (thôi nói): HA huỷ handler (handler_cancellation) hay ``write`` báo lỗi — đều qua ``finally``.
         try:
+            await resp.prepare(request)
             while (pcm := await hang.get()) is not None:
                 if dau:
                     dau = False
