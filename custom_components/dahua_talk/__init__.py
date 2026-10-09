@@ -164,14 +164,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: DahuaTalkConfigEntry) ->
             entry, data={**entry.data, CONF_INTERCOM_KEY: secrets.token_urlsafe(24)})
     d = entry.data
     nghe = Nghe(hass) if d.get(CONF_TALK) == TALK_HIK else None     # chỉ HCNetSDK đưa tiếng camera về
+    mo = _mo_phien_noi(d, get_ffmpeg_manager(hass).binary, hass.config.path(HIK_SDK_DIR), nghe)
     entry.runtime_data = DahuaTalkData(
-        speaker=Speaker(hass, _mo_phien_noi(d, get_ffmpeg_manager(hass).binary,
-                                            hass.config.path(HIK_SDK_DIR), nghe)),
+        speaker=Speaker(hass, mo),
         mic_url=str(d.get(CONF_MIC_URL) or ""),
         che_mic_giay=che_mic_mac_dinh(d),
         mic_camera=nghe,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if isinstance(mo, MoPhienHik):   # đăng nhập sẵn (xem ``hik_talk.NGHI_GIAY``)
+        hass.async_add_executor_job(mo.dang_nhap_truoc)
     return True
 
 

@@ -18,7 +18,7 @@ Luồng: PCM16 ``tan_so`` → ffmpeg của HA mã hoá theo mã camera đòi (AA
 Chương trình trợ giúp SỐNG GIỮA CÁC LƯỢT NÓI (giữ đăng nhập), mỗi lượt chỉ mở / đóng kênh đàm
 thoại. Đo 29/09/2026 trên H6C: đăng nhập 0,6–1,3 s, đăng xuất 0,5 s, mở kênh 0,02–0,27 s. Đăng
 nhập lại mỗi lượt thì tiếng bộ đàm dồn hàng đợi suốt lúc ấy và cả câu phát trễ theo. Ngồi yên
-``NGHI_GIAY`` thì nó tự đăng xuất và thoát; lượt sau dựng lại.
+``NGHI_GIAY`` (cả tuần: thực tế là không bao giờ) thì nó tự đăng xuất và thoát; lượt sau dựng lại.
 """
 
 from __future__ import annotations
@@ -47,8 +47,9 @@ _CHO_MO_GIAY = 15.0
 #: ``send_pcm`` chỉ đi trước thời gian thực ngần này giây (mốc "ting dứt" dựa vào lúc nó trả về).
 _DI_TRUOC = 0.15
 _TOI_DA_GIAY = 300.0
-#: Kênh đóng mà ngồi yên ngần này giây thì chương trình trợ giúp đăng xuất và thoát.
-NGHI_GIAY = 60
+#: Kênh đóng mà ngồi yên ngần này giây thì chương trình trợ giúp đăng xuất và thoát. Đo DB1C 09/10/2026: dựng lại
+#: từ đầu 8,6 s, còn đăng nhập 0,8 s → giữ cả tuần (hik_noi.c nhận mili-giây trong ``int``: 604 800 000 < 2^31).
+NGHI_GIAY = 7 * 24 * 3600
 #: Còn ngần này giây nữa là nó tự thoát thì thôi dùng lại — tránh gửi lệnh đúng lúc nó đang thoát.
 _BIEN_NGHI = 5.0
 #: Camera vừa đóng kênh thì chờ nó nhả kênh tối đa ngần này giây trước khi báo hỏng.
@@ -379,7 +380,7 @@ class MoPhienHik:
         self.nghe = nghe
         self.tan_so = 16000                          # EZVIZ H6C báo AAC 16 kHz
         self._tg: TroGiup | None = None
-        self._khoa = threading.Lock()
+        self._khoa = threading.RLock()               # ``_mo_luot`` gọi ``close()`` khi đang giữ khoá
 
     @property
     def hai_chieu(self) -> bool:
@@ -398,23 +399,36 @@ class MoPhienHik:
             self.tan_so = self._tg.tan_so            # lần sau loa sinh tiếng đúng tần số này
         return self._tg
 
+    def dang_nhap_truoc(self) -> None:
+        """Đăng nhập sẵn lúc dựng mục (xem ``NGHI_GIAY``); hỏng thì chỉ ghi log, lượt nói sẽ báo lỗi đúng chỗ."""
+        with self._khoa:
+            try:
+                self._tro_giup()
+            except Exception as exc:  # noqa: BLE001 — chạy nền, không ai đón
+                _LOGGER.warning("HCNetSDK: pre-login failed: %s", exc)
+
     def _mo_luot(self) -> HikTalkSession:
         with self._khoa:
             moi = self._tg is None or not self._tg.dung_lai_duoc()
+            t0 = time.monotonic()
             tg = self._tro_giup()
             try:
-                return HikTalkSession(tg, ffmpeg=self.ffmpeg).__enter__()
-            except TalkError:
-                if moi or tg.p.poll() is None:
-                    raise                            # mới đăng nhập mà hỏng, hoặc camera từ chối
-            # Bản đang giữ đã chết (camera khởi động lại…) — đăng nhập lại một lần.
-            self.close()
-            return HikTalkSession(self._tro_giup(), ffmpeg=self.ffmpeg).__enter__()
+                s = HikTalkSession(tg, ffmpeg=self.ffmpeg).__enter__()
+            except TalkError as exc:
+                # Mới đăng nhập mà hỏng, hay «mã 29» (camera bận) ngay sau một lượt vừa nói: camera từ chối thật.
+                # Còn lại là bản đang giữ hỏng (chết, phiên SDK cũ sau khi camera khởi động lại): đăng nhập lại một lần.
+                if moi or ("mã 29" in str(exc) and time.monotonic() - tg.ranh_tu < 60):
+                    raise
+                self.close()
+                s = HikTalkSession(self._tro_giup(), ffmpeg=self.ffmpeg).__enter__()
+            _LOGGER.debug("HCNetSDK: turn ready in %.1f s (%s)", time.monotonic() - t0, "new login" if moi else "reused")
+            return s
 
     def close(self) -> None:
-        tg, self._tg = self._tg, None
-        if tg is not None:
-            tg.close()
+        with self._khoa:                             # gỡ mục giữa lúc đăng nhập sẵn: chờ xong rồi đóng, không bỏ sót
+            tg, self._tg = self._tg, None
+            if tg is not None:
+                tg.close()
 
 
 def check_hik_talk(host: str, username: str, password: str, sdk_dir: str,
