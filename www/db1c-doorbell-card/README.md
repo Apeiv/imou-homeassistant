@@ -5,7 +5,7 @@ A Lovelace card for an EZVIZ DB1C (or another HCNetSDK doorbell):
 - live video and audio from Frigate's go2rtc, through the Frigate integration's WebRTC proxy;
 - two-way talk: the microphone goes to dahua_talk's RTSP backchannel source on port 8557, and the visitor's
   voice comes back from `/api/dahua_talk/listen/<speaker entity>` while you talk;
-- the camera's Frigate event history in a full-screen sheet, with clips;
+- the camera's Frigate event history in a bottom sheet (drag it down to close), with clips;
 - an optional Open button for a lock.
 
 It extends `vimar-intercom-card`, so it has the same layout, buttons and states. Away from home, when WebRTC
@@ -65,7 +65,7 @@ Other Vimar card options (such as `shortcuts`) pass through.
 
 ## Colors
 
-The status pill, the ring outline and the round buttons use the card's own CSS variables. Unset, the pill
+The status pill, the ring outline, the round buttons and the history sheet use the card's own CSS variables. Unset, the pill
 follows the Home Assistant theme (through the Vimar card: `--warning-color`, `--primary-color`, its dark glass)
 and the buttons are light glass with dark icons.
 
@@ -78,6 +78,8 @@ and the buttons are light glass with dark icons.
 | `ink` | `--db1c-ink` | pill text | `#fff` |
 | `button` | `--db1c-button` | round buttons' glass | light glass `rgba(255,253,247,.58)` |
 | `button-ink` | `--db1c-button-ink` | round buttons' icons | `#1b1812` |
+| `sheet` | `--db1c-sheet` | history sheet background | `--card-background-color` |
+| `sheet-ink` | `--db1c-sheet-ink` | history sheet text | `--primary-text-color` |
 
 Set the variables in your theme, or per card with `colors:` (it wins over the theme). Values are any CSS
 colour, including `var(...)`. `accent` replaces the per-state dot colours with one colour:

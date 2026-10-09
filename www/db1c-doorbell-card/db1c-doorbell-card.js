@@ -12,7 +12,7 @@
 //   ring: an "on" entity (input_boolean/binary_sensor, or event.*) + an optional input_datetime with the
 //     time of the last ring (ring_time: survives a page reload and gives "rang HH:MM");
 //   video: ALWAYS live, also at rest (always_live, default true; false = like the Vimar card);
-//   history: ALL Frigate events of the camera in a full-screen sheet (thumbnail, label, date, duration,
+//   history: ALL Frigate events of the camera in a bottom sheet (thumbnail, label, date, duration,
 //     paged by `history`), a tap plays the clip in the video box; Frigate's notifications proxy needs no
 //     auth (event id), so no expiring signatures;
 //   startup: the camera's latest picture (entity_picture, ~0.2 s) until the first live frame arrives;
@@ -60,7 +60,9 @@ const DEFAULTS = {
   always_live: true,                  // live video also at rest (false = only on ring/call)
   anchor: "doorbell",                 // URL hash that scrolls to the card; not the Vimar card's one
 };
-const COLORS = ["accent", "warning", "on-warning", "glass", "ink", "button", "button-ink"];  // colors: keys -> --db1c-<key>
+// History sheet: close animation (ms), drag slop and close distance (px), flick window (ms) and speed (px/ms).
+const SHEET_MS = 220, DRAG_SLOP = 8, DRAG_CLOSE = 80, FLICK_MS = 80, FLICK_SPEED = 0.5;
+const COLORS = ["accent", "warning", "on-warning", "glass", "ink", "button", "button-ink", "sheet", "sheet-ink"];  // colors: keys -> --db1c-<key>
 // User-visible strings, picked by `language:` or HA's language; missing language or key = English.
 // Frigate labels are l_<label>: unknown labels show capitalised.
 const I18N = {
@@ -94,8 +96,8 @@ const I18N = {
 // Static texts: data-t = textContent, data-ta = aria-label; filled by _applyLang (hass, hence the language, comes later).
 const CLIP = `<video id="clipv" playsinline controls preload="none" hidden></video>
   <button id="back" data-ta="back_aria" hidden><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon><span data-t="back"></span></button>`;
-const SHEET = `<dialog class="sheet" data-ta="events_aria"><header><span data-t="events"></span>
-  <button class="x" data-ta="close"><ha-icon icon="mdi:close" aria-hidden="true"></ha-icon></button></header>
+const SHEET = `<dialog class="sheet" data-ta="events_aria"><div class="grab"><div class="handle"></div>
+  <header><span data-t="events"></span><button class="x" data-t="close"></button></header></div>
   <div class="evl"><div class="sent"></div></div><p class="evx"></p></dialog>`;
 const EXTRA_CSS = `
   #video > video { width: 100%; height: 100%; object-fit: cover; background: #000; }
@@ -115,16 +117,19 @@ const EXTRA_CSS = `
     -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
   #back[hidden] { display: none; }
   #back ha-icon { --mdc-icon-size: 20px; }
-  /* History like Frigate: full-screen sheet on phones, wide window on desktop. */
-  dialog.sheet { --ink: var(--primary-text-color, #1b1b1f); --dim: var(--secondary-text-color, #6f6a60);
-    box-sizing: border-box; padding: 0; border: 0; width: min(720px, 100vw); height: min(900px, 92dvh); max-width: 100vw;
-    max-height: 100dvh; border-radius: 20px; color: var(--ink); background: var(--card-background-color, #fff); }
-  dialog.sheet[open] { display: flex; flex-direction: column; }
-  dialog.sheet::backdrop { background: rgba(0,0,0,.6); }
-  @media (max-width: 600px) { dialog.sheet { width: 100vw; height: 100dvh; border-radius: 0; } }
-  .sheet header { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 8px 16px;
-    padding-top: max(8px, env(safe-area-inset-top)); font-size: 18px; font-weight: 600; }
-  .sheet .x { width: 44px; height: 44px; border-radius: 22px; display: grid; place-items: center; color: inherit; background: var(--secondary-background-color, rgba(127,127,127,.15)); }
+  /* History: bottom sheet like the dashboard's (Tapparelle, PIN): handle, drag down to close, backdrop closes. */
+  dialog.sheet { --ink: var(--db1c-sheet-ink, var(--primary-text-color, #1b1b1f)); --dim: var(--secondary-text-color, #6f6a60);
+    box-sizing: border-box; padding: 0; border: 0; margin: auto auto 0; width: min(720px, 100vw); max-width: 100vw;
+    height: 82dvh; max-height: 82dvh; border-radius: 22px 22px 0 0; overflow: hidden; color: var(--ink);
+    background: var(--db1c-sheet, var(--card-background-color, #fff)); transition: transform ${SHEET_MS}ms cubic-bezier(.2,.8,.2,1); }
+  dialog.sheet[open] { display: flex; flex-direction: column; animation: db1c-up .28s cubic-bezier(.2,.8,.2,1); }
+  @keyframes db1c-up { from { transform: translateY(100%); } }
+  dialog.sheet::backdrop { background: rgba(0,0,0,.45); }
+  .grab { flex: none; padding: 6px 16px 8px; touch-action: none; cursor: grab; -webkit-user-select: none; user-select: none; }
+  .handle { width: 36px; height: 4px; border-radius: 2px; margin: 0 auto 6px; background: var(--dim); opacity: .6; }
+  .sheet header { display: flex; align-items: center; justify-content: space-between; font-size: 17px; font-weight: 500; }
+  .sheet .x { height: 44px; padding: 0 14px; border: 0; border-radius: 22px; font: inherit; font-size: 14px; color: inherit;
+    cursor: pointer; background: color-mix(in srgb, var(--ink) 10%, transparent); }
   .evl { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; display: grid; align-content: start;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; padding: 4px 12px max(16px, env(safe-area-inset-bottom)); }
   .ev { display: grid; grid-template-columns: 128px 1fr; gap: 12px; align-items: center; width: 100%; padding: 6px; text-align: left;
@@ -370,9 +375,14 @@ customElements.whenDefined(VIMAR).then(() => {
       this._evl = $(".evl");
       this._sent = $(".sent");
       this._evx = $(".evx");
-      this._sheet.onclick = (e) => e.target === this._sheet && this._sheet.close();  // tap on the backdrop
-      $(".sheet .x").onclick = () => this._sheet.close();
-      this._sheet.onclose = () => this._card.dataset.drawer === "true" && super._setDrawer(false);
+      this._sheet.onclick = (e) => e.target === this._sheet && this._hideSheet();  // tap on the backdrop
+      $(".sheet .x").onclick = () => this._hideSheet();
+      this._sheet.onclose = () => {
+        this._sheet.style.transform = this._sheet.style.transition = "";
+        this._dragStop?.abort();  // a gesture whose pointerup never came does not block the next opening
+        if (this._card.dataset.drawer === "true") super._setDrawer(false);
+      };
+      this._dragSheet();
       // At the bottom of the list: the previous page of events.
       new IntersectionObserver((en) => en[0].isIntersecting && this._sheet.open && this._loadHistory(true),
         { root: this._evl, rootMargin: "300px" }).observe(this._sent);
@@ -384,6 +394,8 @@ customElements.whenDefined(VIMAR).then(() => {
       const s = this._sheet;
       if (!s || open === s.open) return;
       if (!open) return s.close();
+      clearTimeout(this._sheetT);
+      s.style.transform = "";
       s.showModal();
       this._histN = (this._histN || 0) + 1;  // answers to earlier openings are dropped
       this._evs = [];
@@ -391,6 +403,70 @@ customElements.whenDefined(VIMAR).then(() => {
       this._evx.textContent = "";
       this._evl.replaceChildren(this._sent);
       this._loadHistory();
+    }
+
+    // Slides the sheet down, then closes it (the Vimar card's own close, e.g. on ring, is instant).
+    _hideSheet() {
+      const s = this._sheet;
+      s.style.transform = "translateY(100%)";
+      clearTimeout(this._sheetT);
+      this._sheetT = setTimeout(() => s.close(), SHEET_MS);
+    }
+
+    // Drag down to close, like the dashboard's sheets: the handle/title drag at once, the list only from its top
+    // and after DRAG_SLOP px down (more down than sideways); released past DRAG_CLOSE px or flicked, it closes,
+    // else it goes back. Transform only, at most once per frame (smooth on iPhone).
+    _dragSheet() {
+      const sheet = this._sheet, list = this._evl;
+      let drag = null;
+      const move = (m) => {
+        if (m.pointerId !== drag.id) return;
+        const dy = m.clientY - drag.y0, dx = Math.abs(m.clientX - drag.x0);
+        if (!drag.on) {
+          if (Math.abs(dy) < DRAG_SLOP && dx < DRAG_SLOP) return;  // still a tap
+          if (dy < DRAG_SLOP || dy < dx) return end(m);  // up or sideways: the list scrolls
+          drag.on = true;
+          sheet.style.transition = "none";
+        }
+        drag.dy = Math.max(0, dy);
+        drag.pts.push([m.timeStamp, m.clientY]);
+        if (drag.pts.length > 8) drag.pts.shift();
+        drag.raf ||= requestAnimationFrame(() => { drag.raf = 0; sheet.style.transform = `translate3d(0, ${drag.dy}px, 0)`; });
+      };
+      const end = (m) => {
+        if (m.pointerId !== drag.id) return;
+        const { on, dy, pts, raf, stop } = drag;
+        stop.abort();
+        drag = null;
+        if (!on) return;
+        cancelAnimationFrame(raf);
+        this._dragged = true;  // no click on the event under the finger
+        setTimeout(() => { this._dragged = false; });
+        const p0 = pts.find(([t]) => m.timeStamp - t <= FLICK_MS) || pts.at(-1);  // speed over the last FLICK_MS
+        const speed = m.timeStamp > p0[0] ? (m.clientY - p0[1]) / (m.timeStamp - p0[0]) : 0;  // px/ms
+        sheet.style.transition = "";
+        if (m.type === "pointerup" && (dy > DRAG_CLOSE || (dy > 20 && speed > FLICK_SPEED))) this._hideSheet();
+        else sheet.style.transform = "";
+      };
+      sheet.addEventListener("pointerdown", (e) => {
+        if ((drag && !drag.stop.signal.aborted) || e.button > 0 || e.target === sheet) return;  // aborted: card left mid-drag
+        const grab = !!e.target.closest(".grab") && !e.target.closest("button");
+        if (!grab && (!list.contains(e.target) || list.scrollTop > 0)) return;
+        const stop = this._dragStop = new AbortController();  // aborted on release or when the card goes away
+        drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, on: grab, dy: 0, raf: 0, pts: [[e.timeStamp, e.clientY]], stop };
+        sheet.getAnimations().forEach((a) => a.finish());  // still sliding up: the finger takes it from where it ends
+        if (grab) sheet.style.transition = "none";
+        const o = { passive: true, signal: stop.signal };
+        window.addEventListener("pointermove", move, o);
+        window.addEventListener("pointerup", end, o);
+        window.addEventListener("pointercancel", end, o);
+      });
+      // iOS: the list must not scroll or bounce while the finger pulls the sheet down (non-passive on purpose)
+      sheet.addEventListener("touchmove", (t) => {
+        const p = t.touches[0];
+        if (drag && p && (drag.on || (p.clientY > drag.y0 && p.clientY - drag.y0 >= Math.abs(p.clientX - drag.x0)))) t.preventDefault();
+      }, { passive: false });
+      sheet.addEventListener("click", (e) => this._dragged && e.stopImmediatePropagation(), true);
     }
 
     // Pill without the name: "rang 08:28" / "ringing · 0:05" / "on call · 0:24" (the Vimar card counts the ring).
@@ -736,6 +812,7 @@ customElements.whenDefined(VIMAR).then(() => {
         `<small><ha-icon icon="mdi:calendar-clock" aria-hidden="true"></ha-icon><span></span></small>` +
         `<small><ha-icon icon="mdi:timer-outline" aria-hidden="true"></ha-icon><span></span></small></span>`;
       const img = b.querySelector("img");
+      img.draggable = false;  // desktop: a drag from the thumbnail moves the sheet, not the picture
       img.src = `${this._evBase(e)}thumbnail.jpg`;
       if (e.has_clip) img.insertAdjacentHTML("afterend", `<ha-icon icon="mdi:play-circle" aria-hidden="true"></ha-icon>`);
       const [when, len] = b.querySelectorAll("small span");
@@ -804,6 +881,8 @@ customElements.whenDefined(VIMAR).then(() => {
       for (const e of PAGE_EVENTS) window.removeEventListener(e, this._onPageState);
       super.disconnectedCallback();
       if (this._sheet?.open) this._sheet.close();
+      this._dragStop?.abort();  // a drag in progress leaves no window listeners behind
+      clearTimeout(this._sheetT);
       clearTimeout(this._ringT);
       clearInterval(this._lineT);
       this._lineT = this._lineAt = null;
