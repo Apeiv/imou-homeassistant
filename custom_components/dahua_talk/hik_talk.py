@@ -36,7 +36,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .http_talk import cat_adts
-from .talk import TAN_SO, AuthError, TalkError
+from .talk import FFMPEG_TRUC_TIEP, TAN_SO, AuthError, TalkError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,16 +54,28 @@ NGHI_GIAY = 7 * 24 * 3600
 _BIEN_NGHI = 5.0
 #: Camera vừa đóng kênh thì chờ nó nhả kênh tối đa ngần này giây trước khi báo hỏng.
 _CHO_NHA_KENH = 3.0
-#: ffmpeg đọc / ghi ống dẫn theo luồng, không gom để dò định dạng (xem ``intercom._FFMPEG_TRUC_TIEP``).
-_FF_TRUC_TIEP = ["-hide_banner", "-loglevel", "error", "-probesize", "32", "-analyzeduration", "0",
-                 "-fflags", "nobuffer"]
+#: Mã lỗi HCNetSDK trong dòng «LOI <mã> …» của hik_noi.c (NET_DVR_GetLastError).
+_MA_SAI_MAT_KHAU = 1                         # NET_DVR_PASSWORD_ERROR
+_MA_BAN = 29                                 # NET_DVR_DVROPRATEFAILED: camera bận / chưa nhả kênh
+#: «Bận» (``_MA_BAN``) trong ngần này giây sau lượt vừa nói là camera bận thật: báo lỗi, không đăng nhập lại.
+_VUA_NOI_GIAY = 60.0
 _MO_KENH = struct.pack(">I", 0xFFFFFFFF)
+_DONG_KENH = struct.pack(">I", 0)
 
 
 def _dinh_dang(ma: str) -> str:
     """Tên định dạng ffmpeg của mã camera đòi (``SAN <mã>``): aac (ADTS) / mulaw / alaw."""
     return "aac" if ma == "AAC" else "mulaw" if ma == "G711U" else "alaw"
-_DONG_KENH = struct.pack(">I", 0)
+
+
+def ma_loi(dong: str) -> int | None:
+    """Mã lỗi SDK của dòng «LOI <mã> …» (0 = không phải lỗi SDK); dòng khác thì None."""
+    m = re.match(r"LOI (\d+) ", dong)
+    return int(m.group(1)) if m else None
+
+
+class CameraBan(TalkError):
+    """Camera từ chối mở kênh đàm thoại vì bận (``_MA_BAN``) quá ``_CHO_NHA_KENH`` giây."""
 
 
 def kien_truc() -> str:
@@ -126,8 +138,7 @@ class TroGiup:
         dong = self._doc(_CHO_MO_GIAY)
         if not dong.startswith("SAN "):
             self.close()
-            ma = re.search(r"mã (\d+)", dong)
-            if "đăng nhập" in dong and ma and ma.group(1) == "1":
+            if ma_loi(dong) == _MA_SAI_MAT_KHAU:      # dòng LOI trước SAN là lỗi đăng nhập
                 raise AuthError("wrong password (HCNetSDK error 1)")
             raise TalkError(dong or "HCNetSDK helper did not answer")
         _san, self.ma, tan_so = dong.split()[:3]
@@ -143,7 +154,7 @@ class TroGiup:
         """Khung mã hoá từ HIK_NGHE_FD → ffmpeg (đọc thẳng ống dẫn) → PCM16 mono ``TAN_SO`` Hz → ``nghe``."""
         # ponytail: 8 kHz cố định — thẻ phát lại bằng bộ phát G.711 của card Vimar; đổi khi cần băng rộng.
         ff = subprocess.Popen(
-            [ffmpeg, *_FF_TRUC_TIEP, "-f", _dinh_dang(self.ma), "-i", "pipe:0",
+            [ffmpeg, *FFMPEG_TRUC_TIEP, "-f", _dinh_dang(self.ma), "-i", "pipe:0",
              "-f", "s16le", "-ar", str(TAN_SO), "-ac", "1", "-flush_packets", "1", "pipe:1"],
             stdin=self._nghe_r, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self._dong_nghe()                            # ffmpeg giữ đầu đọc; hết chương trình trợ giúp là hết ống
@@ -207,7 +218,7 @@ class TroGiup:
         """Mở kênh đàm thoại. Camera vừa đóng kênh chưa nhả xong thì chờ nó nhả rồi mở lại.
 
         Đo 29/09/2026 trên H6C: sau ``StopVoiceCom`` camera cần ~1,2 s mới nhả kênh — mở lại
-        sau 0,2–1 s thì SDK tự chờ (259–1036 ms), mở ngay thì camera từ chối "(mã 29)" (thao tác
+        sau 0,2–1 s thì SDK tự chờ (259–1036 ms), mở ngay thì camera từ chối ``_MA_BAN`` (thao tác
         thất bại). Bộ đàm gặp đúng cảnh ấy khi nói "alo, alo": câu sau mở kênh đúng lúc câu
         trước vừa đóng và bị mất."""
         het = time.monotonic() + _CHO_NHA_KENH
@@ -216,9 +227,10 @@ class TroGiup:
             dong = self._doc(_CHO_MO_GIAY)
             if dong == "OK":
                 return
-            ma = re.search(r"mã (\d+)", dong)
-            if not (ma and ma.group(1) == "29" and time.monotonic() < het):
+            if ma_loi(dong) != _MA_BAN:
                 raise TalkError(dong or "HCNetSDK helper did not answer")
+            if time.monotonic() >= het:
+                raise CameraBan(dong)
             time.sleep(0.3)
 
     def dong_kenh(self, cho: float) -> bool:
@@ -270,7 +282,7 @@ class HikTalkSession:
         ra = (["-c:a", "aac", "-b:a", "32k", "-f", "adts"] if self.ma == "AAC" else
               ["-c:a", "pcm_" + _dinh_dang(self.ma), "-f", _dinh_dang(self.ma)])
         self._ff = subprocess.Popen(
-            [self.ffmpeg, *_FF_TRUC_TIEP,
+            [self.ffmpeg, *FFMPEG_TRUC_TIEP,
              "-f", "s16le", "-ar", str(self.tan_so), "-ac", "1", "-i", "pipe:0",
              *ra, "-flush_packets", "1", "pipe:1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -365,7 +377,7 @@ class _PhienHik:
         if self._s is not None:
             self._s.close()
             if self._s.hong:
-                self._mo.close()
+                self._mo._bo_tro_giup()
 
 
 class MoPhienHik:
@@ -376,8 +388,9 @@ class MoPhienHik:
                  ffmpeg: str = "ffmpeg", port: int = CONG_HIK, nghe=None) -> None:
         self.host, self.username, self.password = host, username, password
         self.sdk_dir, self.ffmpeg, self.port = sdk_dir, ffmpeg, port
-        #: ``intercom.Nghe`` (``feed(pcm)`` + ``nguoi_nghe``): tiếng mic camera về trong lúc kênh mở đi đâu.
+        #: ``intercom.Nghe`` (``feed(pcm)`` + ``co_nguoi_nghe``): tiếng mic camera về trong lúc kênh mở đi đâu.
         self.nghe = nghe
+        self._da_dong = False                        # mục đã gỡ: không dựng chương trình trợ giúp nữa
         self.tan_so = 16000                          # EZVIZ H6C báo AAC 16 kHz
         self._tg: TroGiup | None = None
         self._khoa = threading.RLock()               # ``_mo_luot`` gọi ``close()`` khi đang giữ khoá
@@ -385,14 +398,18 @@ class MoPhienHik:
     @property
     def hai_chieu(self) -> bool:
         """Đang có thẻ nghe tiếng camera về → bộ đàm giữ kênh mở suốt lượt (không VOX)."""
-        return bool(self.nghe is not None and self.nghe.nguoi_nghe)
+        return self.nghe is not None and self.nghe.co_nguoi_nghe
 
     def __call__(self) -> _PhienHik:
         return _PhienHik(self)
 
     def _tro_giup(self) -> TroGiup:
+        if self._da_dong:
+            # Gỡ mục trước khi lượt đăng nhập sẵn kịp chạy: đừng dựng chương trình trợ giúp mồ côi (đăng nhập tới khi
+            # ``NGHI_GIAY`` hết, giữ mật khẩu, không ai đóng).
+            raise TalkError("integration entry unloaded")
         if self._tg is not None and not self._tg.dung_lai_duoc():
-            self.close()
+            self._bo_tro_giup()
         if self._tg is None:
             self._tg = TroGiup(self.host, self.port, self.username, self.password, self.sdk_dir,
                                nghe=self.nghe.feed if self.nghe else None, ffmpeg=self.ffmpeg)
@@ -415,17 +432,24 @@ class MoPhienHik:
             try:
                 s = HikTalkSession(tg, ffmpeg=self.ffmpeg).__enter__()
             except TalkError as exc:
-                # Mới đăng nhập mà hỏng, hay «mã 29» (camera bận) ngay sau một lượt vừa nói: camera từ chối thật.
+                # Mới đăng nhập mà hỏng, hay camera bận ngay sau một lượt vừa nói: camera từ chối thật.
                 # Còn lại là bản đang giữ hỏng (chết, phiên SDK cũ sau khi camera khởi động lại): đăng nhập lại một lần.
-                if moi or ("mã 29" in str(exc) and time.monotonic() - tg.ranh_tu < 60):
+                if moi or (isinstance(exc, CameraBan) and time.monotonic() - tg.ranh_tu < _VUA_NOI_GIAY):
                     raise
-                self.close()
+                self._bo_tro_giup()
                 s = HikTalkSession(self._tro_giup(), ffmpeg=self.ffmpeg).__enter__()
             _LOGGER.debug("HCNetSDK: turn ready in %.1f s (%s)", time.monotonic() - t0, "new login" if moi else "reused")
             return s
 
     def close(self) -> None:
+        """Gỡ mục: đóng chương trình trợ giúp và không dựng lại nữa."""
         with self._khoa:                             # gỡ mục giữa lúc đăng nhập sẵn: chờ xong rồi đóng, không bỏ sót
+            self._da_dong = True
+            self._bo_tro_giup()
+
+    def _bo_tro_giup(self) -> None:
+        """Bỏ chương trình trợ giúp đang giữ (hỏng / hết hạn); lượt sau dựng lại."""
+        with self._khoa:
             tg, self._tg = self._tg, None
             if tg is not None:
                 tg.close()
@@ -443,5 +467,5 @@ def check_hik_talk(host: str, username: str, password: str, sdk_dir: str,
         tg.close()
 
 
-__all__ = ["CONG_HIK", "HikTalkSession", "MoPhienHik", "TroGiup", "check_hik_talk",
+__all__ = ["CONG_HIK", "CameraBan", "HikTalkSession", "MoPhienHik", "TroGiup", "check_hik_talk",
            "sdk_san_sang"]

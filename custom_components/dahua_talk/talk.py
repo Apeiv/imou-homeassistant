@@ -23,6 +23,10 @@ KENH = 0
 TAN_SO = 8000
 #: PCM16 mono 8 kHz, khối 40 ms — định dạng của bản Talk mẫu của Dahua.
 KHOI = 640
+#: Cờ bắt buộc cho ffmpeg đọc / ghi ống dẫn theo luồng: thiếu chúng, ffmpeg gom tiếng để dò định dạng rồi mới
+#: nhả — đo 24/09/2026: 2,5 giây vào mà 0 byte ra. Dùng chung cho bộ đàm (``intercom``) và HCNetSDK (``hik_talk``).
+FFMPEG_TRUC_TIEP = ["-hide_banner", "-loglevel", "error", "-probesize", "32", "-analyzeduration", "0",
+                    "-fflags", "nobuffer"]
 
 _HDR = 32
 _A0, _B0, _A1, _F4, _TALK = 0xA0, 0xB0, 0xA1, 0xF4, 0x1D

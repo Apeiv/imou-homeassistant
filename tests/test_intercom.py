@@ -3,6 +3,7 @@
 import asyncio
 import math
 import struct
+from types import SimpleNamespace
 from unittest import mock
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -39,6 +40,8 @@ def _alaw(pcm: bytes) -> bytes:
 
 
 class LoaGia:
+    hai_chieu = False
+
     def __init__(self):
         self.phien: list[bytes] = []
 
@@ -199,3 +202,83 @@ async def test_nghe_phat_tieng_camera_cho_the(hass, hass_client):
             break
         await asyncio.sleep(0.02)
     assert not nghe.nguoi_nghe and not muc.runtime_data.speaker.hai_chieu
+
+
+class LoaHong(LoaGia):
+    """Loa hai chiều mà lượt đầu hỏng (camera từ chối kênh)."""
+    hai_chieu = True
+
+    def __init__(self):
+        super().__init__()
+        self.lan = 0
+
+    async def async_play_pcm(self, chunks, tan_so=8000, song=False):
+        self.lan += 1
+        if self.lan == 1:
+            raise RuntimeError("camera từ chối")
+        return await super().async_play_pcm(chunks, tan_so, song)
+
+
+async def test_loa_hong_thi_cho_cho_loi_roi_mo_lai(hass, monkeypatch):
+    t = [100.0]
+    monkeypatch.setattr(intercom, "time", SimpleNamespace(monotonic=lambda: t[0]))   # chỉ đồng hồ của intercom
+    loa = LoaHong()
+    ic = intercom.Intercom(hass, loa)
+    ic.feed(_song(0.1, -20))
+    await asyncio.sleep(0.01)                        # lượt đầu hỏng → đóng kênh, nhớ lúc hỏng
+    assert ic._hang is None and loa.lan == 1
+    ic.feed(_im(0.1))                                # trong ``_CHO_LOI``: im thì không mở lại (VOX)
+    assert ic._hang is None
+    t[0] += intercom._CHO_LOI + 0.1
+    ic.feed(_im(0.1))                                # hết chờ: hai chiều mở lại từ khúc đầu
+    assert ic._hang is not None
+    await ic.async_close()
+    assert loa.lan == 2 and len(ic._viec) == 1       # việc đã xong không tích lại
+
+
+async def test_noi_qua_lau_thi_dong_kenh(hass, monkeypatch):
+    t = [100.0]
+    monkeypatch.setattr(intercom, "time", SimpleNamespace(monotonic=lambda: t[0]))   # chỉ đồng hồ của intercom
+    loa = LoaGia()
+    loa.hai_chieu = True
+    ic = intercom.Intercom(hass, loa)
+    ic.feed(_im(0.1))
+    t[0] += intercom.TOI_DA_NOI_GIAY
+    ic.feed(_im(0.1))
+    assert ic._hang is None and ic.het_gio
+    ic.feed(_song(0.1, -20))                         # cả tiếng to cũng không mở lại trong phiên này
+    assert ic._hang is None
+    await ic.async_close()
+    assert len(loa.phien) == 1
+
+
+async def test_nghe_dong_tha_ca_hang_day(hass):
+    nghe = intercom.Nghe(hass)
+    hang = asyncio.Queue()
+    nghe.nguoi_nghe.add(hang)
+    for _ in range(intercom.TOI_DA_KHUC_NGHE + 5):
+        nghe._phat(b"\x00\x00")
+    assert hang.qsize() == intercom.TOI_DA_KHUC_NGHE   # trần hàng đợi
+    nghe.close()
+    assert hang.qsize() == intercom.TOI_DA_KHUC_NGHE + 1
+    for _ in range(intercom.TOI_DA_KHUC_NGHE):
+        hang.get_nowait()
+    assert hang.get_nowait() is None                  # hàng đầy vẫn nhận tín hiệu hết
+
+
+async def test_listen_sau_go_muc_tra_404(hass, hass_client):
+    from homeassistant.helpers import entity_registry as er
+    muc = MockConfigEntry(domain=DOMAIN, title="Cam hik", data={
+        "name": "Cam hik", "host": "192.168.1.66", "port": 554, "username": "admin", "password": "mk",
+        "mic_url": "", "talk_protocol": "hik", "hik_port": 8443})
+    await _nap(hass, muc)
+    mp = next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
+              if e.domain == "media_player")
+    client = await hass_client()
+    r = await client.get(f"/api/dahua_talk/listen/{mp}")
+    assert r.status == 200
+    nghe = muc.runtime_data.mic_camera
+    await asyncio.sleep(0)
+    assert await hass.config_entries.async_unload(muc.entry_id)   # gỡ mục: người đang nghe được thả
+    assert await r.content.read() == b""
+    assert (await client.get(f"/api/dahua_talk/listen/{mp}")).status == 404

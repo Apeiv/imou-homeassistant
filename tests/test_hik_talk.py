@@ -37,7 +37,7 @@ def gia(tmp_path):
 import os, struct, sys
 bao = os.fdopen(int(os.environ["HIK_BAO_FD"]), "w", buffering=1)
 if os.environ.get("HIK_MK") == "sai":
-    bao.write("LOI đăng nhập cổng 8000 không được (mã 1)\\n"); sys.exit(3)
+    bao.write("LOI 1 đăng nhập cổng 8000 không được\\n"); sys.exit(3)
 nhat_ky = open({str(ghi)!r}, "a", buffering=1)
 nhat_ky.write("dang_nhap\\n")
 bao.write("SAN AAC 16000\\n")
@@ -47,10 +47,10 @@ while len(d := sys.stdin.buffer.read(4)) == 4:
     if n == 0xFFFFFFFF:
         so_mo += 1
         if so_mo >= int(os.environ.get("HIK_BAN_TU_LUOT", 10**9)):   # phiên SDK cũ hỏng: từ chối mãi
-            bao.write("LOI camera không mở kênh đàm thoại (mã 29)\\n"); continue
+            bao.write("LOI 29 camera không mở kênh đàm thoại\\n"); continue
         if ban := int(os.environ.get("HIK_BAN_CON", "0")):
             os.environ["HIK_BAN_CON"] = str(ban - 1)
-            bao.write("LOI camera không mở kênh đàm thoại (mã 29)\\n"); continue
+            bao.write("LOI 29 camera không mở kênh đàm thoại\\n"); continue
         mo, n_khung = True, 0; bao.write("OK\\n")
         if fd := os.environ.get("HIK_NGHE_FD"):                 # camera nói lại: 3 khung mic về
             os.write(int(fd), {ADTS!r} * 3)
@@ -64,7 +64,7 @@ while len(d := sys.stdin.buffer.read(4)) == 4:
             continue                                     # khung lạc khi kênh đã đóng: bỏ (như hik_noi.c)
         n_khung += 1
         if n_khung == int(os.environ.get("HIK_HONG_SAU", "0")):
-            bao.write("LOI gửi tiếng hỏng (mã 41)\\n"); mo = False
+            bao.write("LOI 41 gửi tiếng hỏng\\n"); mo = False
 nhat_ky.write("dang_xuat\\n")
 """)
     ffmpeg = _tep(tmp_path / "ffmpeg", f"""
@@ -301,10 +301,10 @@ def test_hai_chieu_tieng_mic_camera_ve_qua_nghe(gia):
     không mở fd, không ffmpeg giải mã."""
     ffmpeg, _ghi = gia
     ve = []
-    nghe = SimpleNamespace(feed=ve.append, nguoi_nghe=set())      # như intercom.Nghe
+    nghe = SimpleNamespace(feed=ve.append, co_nguoi_nghe=False)  # như intercom.Nghe
     mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg, nghe=nghe)
     assert not mo.hai_chieu                               # chưa ai nghe: VOX như cũ
-    nghe.nguoi_nghe.add(1)
+    nghe.co_nguoi_nghe = True
     assert mo.hai_chieu
     with mo() as s:
         s.send_pcm(b"\x00\x01" * 2048)
@@ -321,3 +321,24 @@ def test_hai_chieu_tieng_mic_camera_ve_qua_nghe(gia):
         s.send_pcm(b"\x00\x01" * 2048)
     assert mo._tg._ff_nghe is None
     mo.close()
+
+
+def test_ma_loi_doc_so_khong_doc_chu():
+    assert hik_talk.ma_loi("LOI 29 bất kỳ chữ gì") == 29
+    assert hik_talk.ma_loi("LOI 0 thiếu tham số") == 0
+    assert hik_talk.ma_loi("OK") is None and hik_talk.ma_loi("") is None
+
+
+def test_dinh_dang_g711():
+    assert [hik_talk._dinh_dang(m) for m in ("AAC", "G711U", "G711A")] == ["aac", "mulaw", "alaw"]
+
+
+def test_go_muc_truoc_dang_nhap_san_thi_khong_dung_tro_giup(gia):
+    """Gỡ mục trước khi lượt đăng nhập sẵn kịp chạy: không để lại chương trình trợ giúp mồ côi."""
+    ffmpeg, ghi = gia
+    mo = hik_talk.MoPhienHik("10.0.0.9", "admin", "MA", sdk_dir="/x", ffmpeg=ffmpeg)
+    mo.close()
+    mo.dang_nhap_truoc()
+    assert mo._tg is None and _nhat_ky(ghi) == []
+    with pytest.raises(TalkError, match="unloaded"):
+        mo().__enter__()

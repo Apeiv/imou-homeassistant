@@ -13,7 +13,8 @@
  *       nguyên như camera gửi: AAC ADTS hay G.711, cùng mã với chiều nói); không đặt thì bỏ tiếng ấy
  *   kênh báo (fd trong HIK_BAO_FD, mặc định 3), mỗi dòng một tin:
  *       "SAN <mã> <tần_số>" đăng nhập xong  |  "OK" kênh đã mở  |  "DONG" kênh đã đóng
- *       "LOI <thông điệp>" hỏng (sau LOI lúc đăng nhập thì chương trình thoát; LOI GIỮA LƯỢT — gửi tiếng hỏng
+ *       "LOI <mã> <thông điệp>" hỏng — <mã> = mã lỗi HCNetSDK (NET_DVR_GetLastError), 0 nếu không phải lỗi SDK;
+ *       tích hợp đọc số này, không đọc chữ. (sau LOI lúc đăng nhập thì chương trình thoát; LOI GIỮA LƯỢT — gửi tiếng hỏng
  *       hay SDK báo EXCEPTION_AUDIOEXCHANGE — thì kênh đã đóng, vẫn giữ đăng nhập cho lượt sau)
  *   stdin: mỗi mục = 4 byte độ dài (big-endian) + dữ liệu
  *       0xFFFFFFFF = mở kênh đàm thoại; n > 0 = một khung tiếng; 0 = phát nốt rồi đóng kênh
@@ -79,7 +80,8 @@ static void ngoai_le(unsigned loai, int uid, int h, void *u) {
  * bên đọc chậm thì mất khung (hay khung bị cắt dở: ffmpeg tự bắt lại đầu khung ADTS) chứ luồng SDK không treo. */
 static int nghe_fd = -1;
 static void nghe_mic(int h, char *b, unsigned n, unsigned char f, void *u) {
-    (void)h; (void)f; (void)u;
+    (void)h; (void)u;
+    if (f != 1) return;                                    /* byAudioFlag: 0 = tiếng máy này, 1 = tiếng camera */
     if (nghe_fd >= 0 && n) { ssize_t r = write(nghe_fd, b, n); (void)r; }
 }
 
@@ -104,7 +106,7 @@ static void ngu(double giay) {
     nanosleep(&t, NULL);
 }
 
-#define SYM(kieu, ten) kieu ten = (kieu)dlsym(sdk, #ten); if (!ten) { fprintf(bao, "LOI thiếu hàm " #ten "\n"); return 2; }
+#define SYM(kieu, ten) kieu ten = (kieu)dlsym(sdk, #ten); if (!ten) { fprintf(bao, "LOI 0 thiếu hàm " #ten "\n"); return 2; }
 
 int main(int argc, char **argv) {
     const char *fd_bao = getenv("HIK_BAO_FD");            /* số fd kênh báo, mặc định 3 */
@@ -112,9 +114,9 @@ int main(int argc, char **argv) {
     if (!bao) return 9;
     setvbuf(bao, NULL, _IOLBF, 0);
     signal(SIGPIPE, SIG_IGN);                            /* ffmpeg nghe chết thì write() trả EPIPE, không giết ta */
-    if (argc < 4) { fprintf(bao, "LOI thiếu tham số\n"); return 1; }
+    if (argc < 4) { fprintf(bao, "LOI 0 thiếu tham số\n"); return 1; }
     const char *lib = getenv("HIK_LIB"), *mk = getenv("HIK_MK");
-    if (!lib || !mk) { fprintf(bao, "LOI thiếu HIK_LIB / HIK_MK\n"); return 1; }
+    if (!lib || !mk) { fprintf(bao, "LOI 0 thiếu HIK_LIB / HIK_MK\n"); return 1; }
     const char *fd_nghe = getenv("HIK_NGHE_FD");
     if (fd_nghe) { nghe_fd = atoi(fd_nghe); fcntl(nghe_fd, F_SETFL, fcntl(nghe_fd, F_GETFL) | O_NONBLOCK); }
     char duong[1024];
@@ -125,7 +127,7 @@ int main(int argc, char **argv) {
     }
     snprintf(duong, sizeof duong, "%s/libhcnetsdk.so", lib);
     void *sdk = dlopen(duong, RTLD_NOW | RTLD_GLOBAL);
-    if (!sdk) { fprintf(bao, "LOI không nạp được HCNetSDK (%s)\n", dlerror()); return 2; }
+    if (!sdk) { fprintf(bao, "LOI 0 không nạp được HCNetSDK (%s)\n", dlerror()); return 2; }
     SYM(f_setcfg, NET_DVR_SetSDKInitCfg) SYM(f_int, NET_DVR_Init) SYM(f_conn, NET_DVR_SetConnectTime)
     SYM(f_login, NET_DVR_Login_V40) SYM(f_err, NET_DVR_GetLastError) SYM(f_comp, NET_DVR_GetCurrentAudioCompress)
     SYM(f_start, NET_DVR_StartVoiceCom_MR_V30) SYM(f_send, NET_DVR_VoiceComSendData)
@@ -143,10 +145,13 @@ int main(int argc, char **argv) {
     li.byHttps = li.wPort == 8443;                       /* SDK over TLS, no CA check (byVerifyMode 0) */
     snprintf(li.sUserName, sizeof li.sUserName, "%s", argv[3]);
     snprintf(li.sPassword, sizeof li.sPassword, "%s", mk);
+    /* Sống nhiều ngày: xoá mật khẩu khỏi vùng env (đọc được qua /proc/<pid>/environ) ngay khi chép xong. */
+    memset((char *)mk, 0, strlen(mk));
+    unsetenv("HIK_MK");
     unsigned char dev[1024];
     int uid = NET_DVR_Login_V40(&li, dev);
     if (uid < 0) {
-        fprintf(bao, "LOI đăng nhập cổng %s không được (mã %u)\n", argv[2], NET_DVR_GetLastError());
+        fprintf(bao, "LOI %u đăng nhập cổng %s không được\n", NET_DVR_GetLastError(), argv[2]);
         NET_DVR_Cleanup(); return 3;
     }
     AudioComp ac; memset(&ac, 0, sizeof ac);
@@ -157,7 +162,7 @@ int main(int argc, char **argv) {
     int tan_so = ac.byAudioSamplingRate < 6 ? tan_so_bang[ac.byAudioSamplingRate] : 16000;
     if (ma && strcmp(ma, "AAC")) tan_so = 8000;
     if (!ma) {
-        fprintf(bao, "LOI camera đòi mã đàm thoại chưa hỗ trợ (%u)\n", ac.byAudioEncType);
+        fprintf(bao, "LOI 0 camera đòi mã đàm thoại chưa hỗ trợ (%u)\n", ac.byAudioEncType);
         NET_DVR_Logout(uid); NET_DVR_Cleanup(); return 4;
     }
     fprintf(bao, "SAN %s %d\n", ma, tan_so);
@@ -177,7 +182,7 @@ int main(int argc, char **argv) {
         uint32_t n = ((uint32_t)dau[0] << 24) | ((uint32_t)dau[1] << 16) | ((uint32_t)dau[2] << 8) | dau[3];
         if (n == 0xFFFFFFFFu) {                            /* mở kênh */
             if (h < 0) { kenh_hong = -1; h = NET_DVR_StartVoiceCom_MR_V30(uid, 1, nghe_mic, NULL); }
-            if (h < 0) fprintf(bao, "LOI camera không mở kênh đàm thoại (mã %u)\n", NET_DVR_GetLastError());
+            if (h < 0) fprintf(bao, "LOI %u camera không mở kênh đàm thoại\n", NET_DVR_GetLastError());
             else fprintf(bao, "OK\n");
             t0 = -1; da_phat = 0;
             continue;
@@ -197,8 +202,8 @@ int main(int argc, char **argv) {
         ngu(t0 + da_phat - bay_gio());
         int gui_duoc = NET_DVR_VoiceComSendData(h, (char *)khung, n);
         if (!gui_duoc || kenh_hong == h) {
-            if (!gui_duoc) fprintf(bao, "LOI gửi tiếng hỏng (mã %u)\n", NET_DVR_GetLastError());
-            else fprintf(bao, "LOI camera rớt kênh đàm thoại (ngoại lệ 0x%x)\n", EXCEPTION_AUDIOEXCHANGE);
+            if (!gui_duoc) fprintf(bao, "LOI %u gửi tiếng hỏng\n", NET_DVR_GetLastError());
+            else fprintf(bao, "LOI 0 camera rớt kênh đàm thoại (ngoại lệ 0x%x)\n", EXCEPTION_AUDIOEXCHANGE);
             NET_DVR_StopVoiceCom(h);
             h = -1;                                        /* khung còn lại của lượt này bị bỏ; vẫn giữ đăng nhập */
             continue;

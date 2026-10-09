@@ -35,7 +35,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .speaker import NGUONG_IM_DB, muc_db
-from .talk import TAN_SO
+from .talk import FFMPEG_TRUC_TIEP, TAN_SO
 
 if TYPE_CHECKING:
     from .speaker import Speaker
@@ -51,10 +51,11 @@ IM_GIAY = 1.5
 DEM_GIAY = 0.3
 #: Loa hỏng (camera từ chối kênh, chương trình trợ giúp chết): chờ ngần này giây rồi mới mở lại (kênh hai chiều).
 _CHO_LOI = 2.0
-
-#: Cờ bắt buộc cho ffmpeg đọc ống dẫn theo luồng: thiếu chúng, ffmpeg gom tiếng để
-#: dò định dạng rồi mới nhả — đo 24/09/2026: 2,5 giây vào mà 0 byte ra.
-_FFMPEG_TRUC_TIEP = "-probesize 32 -analyzeduration 0 -fflags nobuffer"
+#: Một lần mở kênh nói dài tối đa ngần này giây; quá thì đóng gọn và phiên bộ đàm này thôi phát. Kênh hai chiều
+#: không có VOX: quên tắt "nói" thì loa camera phát tiếng phòng mãi và camera tắt luôn tiếng RTSP của nó (bản ghi câm).
+TOI_DA_NOI_GIAY = 180.0
+#: Mỗi người nghe giữ tối đa ngần này khúc (khúc ≤ 4096 byte ≈ 0,26 s ở 8 kHz → ~4 s); chậm hơn thì bỏ khúc mới.
+TOI_DA_KHUC_NGHE = 16
 
 
 def _bang_alaw() -> list[int]:
@@ -82,8 +83,10 @@ class Intercom:
     def __init__(self, hass: HomeAssistant, speaker: "Speaker", tan_so: int = TAN_SO) -> None:
         self.hass, self.speaker, self.tan_so = hass, speaker, tan_so
         self.seconds = 0.0            # tổng số giây đã phát ra loa
-        self._loi_luc = -1e9          # lúc loa hỏng gần nhất: chờ ``_CHO_LOI`` giây rồi mới mở lại
+        self._loi_luc = float("-inf")  # lúc loa hỏng gần nhất: chờ ``_CHO_LOI`` giây rồi mới mở lại
         self._hang: asyncio.Queue[bytes | None] | None = None
+        self._mo_luc = 0.0            # lúc mở kênh nói hiện tại (``TOI_DA_NOI_GIAY``)
+        self.het_gio = False          # đã quá ``TOI_DA_NOI_GIAY``: bỏ mọi tiếng tới cuối phiên
         self._viec: list[asyncio.Task] = []
         self._dem: list[tuple[float, bytes]] = []     # (lúc tới, PCM) ngay trước tiếng người
         self._im = 0.0
@@ -107,12 +110,17 @@ class Intercom:
 
     def feed(self, pcm: bytes) -> None:
         pcm = pcm[: len(pcm) // 2 * 2]
-        if not pcm:
+        if not pcm or self.het_gio:
             return
         luc = time.monotonic()
+        if self._hang is not None and luc - self._mo_luc >= TOI_DA_NOI_GIAY:
+            _LOGGER.info("intercom: talk channel open for %.0f s, closing it for this session", TOI_DA_NOI_GIAY)
+            self.het_gio = True
+            self.stop_talking()
+            return
         # Đàm thoại hai chiều (HCNetSDK, có thẻ đang nghe ``NgheView``): kênh mở từ khúc đầu và giữ suốt — tiếng
         # camera về qua kênh đàm thoại, không cần đóng để nghe. Không ai nghe thì VOX như cũ. Xét từng khúc.
-        hai_chieu = getattr(self.speaker, "hai_chieu", False) and luc - self._loi_luc > _CHO_LOI
+        hai_chieu = self.speaker.hai_chieu and luc - self._loi_luc > _CHO_LOI
         co_tieng = hai_chieu or muc_db(pcm) > NGUONG_DB
         self._im = 0.0 if co_tieng else self._im + len(pcm) / (2 * self.tan_so)
         if self._hang is None:
@@ -121,12 +129,16 @@ class Intercom:
                 while sum(len(p) for _t, p in self._dem[1:]) >= DEM_GIAY * self.tan_so * 2:
                     self._dem.pop(0)
                 return
-            self._hang = asyncio.Queue()
-            self._viec.append(self.hass.async_create_task(self._phat(self._hang)))
+            self._hang, self._mo_luc = asyncio.Queue(), luc
             for muc in self._dem:                   # đệm đầu câu giữ đúng lúc tới của nó
                 self._hang.put_nowait(muc)
             self._dem = []
-        self._hang.put_nowait((luc, pcm))
+            self._hang.put_nowait((luc, pcm))
+            # Tạo việc SAU khi đổ hàng: HA chạy task ngay (eager) — loa hỏng tức thì thì ``_hang`` đã về None.
+            self._viec = [v for v in self._viec if not v.done()]     # thử lại mỗi ``_CHO_LOI`` giây: đừng tích mãi
+            self._viec.append(self.hass.async_create_task(self._phat(self._hang)))
+        else:
+            self._hang.put_nowait((luc, pcm))
         if self._im >= IM_GIAY:
             self.stop_talking()
 
@@ -186,22 +198,25 @@ class Nghe:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.nguoi_nghe: set[asyncio.Queue[bytes | None]] = set()   # None = hết (gỡ mục)
-        self.da_co = False             # log một lần: camera có gửi tiếng về hay không
+        self.da_dong = False            # mục đã gỡ: không nhận người nghe mới
+
+    @property
+    def co_nguoi_nghe(self) -> bool:
+        return bool(self.nguoi_nghe)
 
     def feed(self, pcm: bytes) -> None:
         self.hass.loop.call_soon_threadsafe(self._phat, pcm)
 
-    def _phat(self, pcm: bytes | None) -> None:
-        if pcm and not self.da_co:
-            self.da_co = True
-            _LOGGER.debug("listen: audio from the camera is flowing")
+    def _phat(self, pcm: bytes) -> None:
         for hang in self.nguoi_nghe:
-            if hang.qsize() < 50:      # người nghe chết lặng: bỏ khúc, không tích vô hạn
+            if hang.qsize() < TOI_DA_KHUC_NGHE:      # người nghe chết lặng: bỏ khúc, không tích vô hạn
                 hang.put_nowait(pcm)
 
     def close(self) -> None:
-        """Gỡ mục: thả mọi người đang nghe."""
-        self._phat(None)
+        """Gỡ mục: thả mọi người đang nghe — kể cả người có hàng đợi đầy (``None`` không bị bỏ)."""
+        self.da_dong = True
+        for hang in self.nguoi_nghe:
+            hang.put_nowait(None)
 
 
 class NgheView(HomeAssistantView):
@@ -214,15 +229,19 @@ class NgheView(HomeAssistantView):
         hass: HomeAssistant = request.app["hass"]
         entry = muc_theo_entity(hass, entity_id)
         nghe = getattr(getattr(entry, "runtime_data", None), "mic_camera", None)
-        if nghe is None:
+        if nghe is None or nghe.da_dong:
             return web.Response(status=404)
         resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Cache-Control": "no-store"})
         await resp.prepare(request)
         hang: asyncio.Queue[bytes | None] = asyncio.Queue()
         nghe.nguoi_nghe.add(hang)
+        dau = True
         # Thẻ ngắt (thôi nói): HA huỷ handler (handler_cancellation) hay ``write`` báo lỗi — đều qua ``finally``.
         try:
             while (pcm := await hang.get()) is not None:
+                if dau:
+                    dau = False
+                    _LOGGER.debug("listen: audio from the camera is flowing")
                 await resp.write(pcm)
         except ConnectionResetError:
             pass
@@ -251,6 +270,6 @@ def go2rtc_source(hass: HomeAssistant, entry_id: str, key: str, ha_url: str = ""
         kieu = "https" if getattr(http, "ssl_certificate", None) else "http"
         goc = f"{kieu}://127.0.0.1:{cong}"
     url = f"{goc}/api/dahua_talk/intercom/{entry_id}?k={key}"
-    return (f"exec:ffmpeg -hide_banner -loglevel error {_FFMPEG_TRUC_TIEP} "
-            f"-f alaw -ar 8000 -ac 1 -i - -c:a copy -f alaw -flush_packets 1 "
+    return (f"exec:ffmpeg {' '.join(FFMPEG_TRUC_TIEP)} "
+            f"-f alaw -ar 8000 -ac 1 -i - -c:a copy -f alaw -flush_packets 1 "    # G.711: 8 kHz theo định nghĩa
             f"-method POST {url}#backchannel=1#audio=alaw/8000")

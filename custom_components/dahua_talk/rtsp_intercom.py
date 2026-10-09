@@ -30,6 +30,10 @@ CONG_RTSP = 8557
 _PT_OPUS = 96
 #: Một khối yêu cầu RTSP (dòng đầu + header) dài hơn ngần này là không phải go2rtc — ngắt.
 _TOI_DA_YEU_CAU = 8192
+#: Sau PLAY trình duyệt gửi Opus liên tục (~50 gói/s); im ngần này giây là go2rtc giữ kết nối chết — đóng.
+_CHO_RTP_GIAY = 15.0
+#: Trước PLAY: ngần này giây không có lệnh nào (khớp ``Session: …;timeout=60``) thì đóng.
+_CHO_LENH_GIAY = 60.0
 _SDP = ("v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=dahua_talk\r\nt=0 0\r\n"
         f"m=audio 0 RTP/AVP {_PT_OPUS}\r\na=rtpmap:{_PT_OPUS} opus/48000/2\r\n"
         "a=control:trackID=0\r\na=sendonly\r\n")
@@ -129,7 +133,9 @@ class MayChuBoDam:
         giai_ma: GiaiMaOpus | None = None
         try:
             while True:
-                dau = await r.readexactly(1)
+                # go2rtc giữ TCP mà không gửi gì (cả RTP lẫn GET_PARAMETER giữ phiên): đóng để nhả loa camera.
+                async with asyncio.timeout(_CHO_RTP_GIAY if phien else _CHO_LENH_GIAY):
+                    dau = await r.readexactly(1)
                 if dau == b"$":                      # gói RTP xen trong TCP
                     ch_n = await r.readexactly(3)
                     goi = await r.readexactly(int.from_bytes(ch_n[1:3], "big"))
@@ -183,7 +189,7 @@ class MayChuBoDam:
                 await w.drain()
                 if ma.startswith(("404", "454")):
                     return
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError):
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, TimeoutError):
             pass
         finally:
             if phien is not None:
