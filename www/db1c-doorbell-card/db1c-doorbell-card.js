@@ -185,6 +185,11 @@ const hm = (t, T, sec) => new Date(t).toLocaleTimeString(T.lang, { hour: "2-digi
 const hhmm = (t, T) => ago(t, 0) ? hm(t, T) : `${dm(t, T)} ${hm(t, T)}`;  // "08:28" today, "8 Oct 08:28" other days
 const day = (t, T) => ago(t, 0) ? T.today : ago(t, 1) ? T.yesterday : dm(t, T);
 const LIVE = ["ringing", "calling", "in_call"];
+const PAGE_EVENTS = ["visibilitychange", "pagehide", "pageshow"];  // listened on window, see _onPageState
+// Page left (pagehide) or, on phones/tablets, app in the background (hidden). On a desktop a hidden tab keeps
+// the call going: switching tabs must not hang up.
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+const pageGone = (e) => e?.type === "pagehide" || (TOUCH && document.visibilityState === "hidden");
 const hangUp = (pc) => { pc?.close(); pc?.sock?.close(); };  // PeerConnection + its go2rtc WebSocket
 const dur = (e, T) => {
   if (!e.end_time) return T.ongoing;
@@ -261,6 +266,8 @@ customElements.whenDefined(VIMAR).then(() => {
 
     // The vimar_intercom services become local states: the DB1C has no "call", WebRTC is either there or not.
     async _call(service) {
+      // Hidden: no new session (a microphone permission that resolves after the app went to the background).
+      if (this._hidden && (service === "call" || service === "answer")) return;
       this._err.textContent = this._hint;
       this._declined = this._lastRing;  // every action "consumes" the current ring
       if (service === "hangup" || service === "decline") {
@@ -405,10 +412,10 @@ customElements.whenDefined(VIMAR).then(() => {
     }
 
     // Live video: a <video> on the PeerConnection; at rest the Vimar card (picture-entity of the camera).
-    // ponytail: at rest the PeerConnection stays open with the tab hidden too; close it on
-    // visibilitychange if it weighs on battery/go2rtc.
+    // Never with the page hidden (_onPageState): iOS keeps WebRTC audio playing in the background.
     _setVideo(live) {
-      live ||= !!this._cfg.always_live && this._state !== "offline" && (!this._popup || this._pop.open);
+      const always = !!this._cfg.always_live && this._state !== "offline" && (!this._popup || this._pop.open);
+      live = !this._hidden && (live || always);
       if (this._live === live) return;
       this._closePeer();
       this._connected = this._fellBack = false;
@@ -555,13 +562,14 @@ customElements.whenDefined(VIMAR).then(() => {
     // listen_on_ring: the Vimar card calls it in the live states; here once per ring, so a mute
     // chosen during the ring sticks. The iOS check (real gesture) is the Vimar one, _unlockedContext.
     async _startListen() {
-      if (this._audible || this._heardRing === this._lastRing) return;
+      if (this._hidden || this._audible || this._heardRing === this._lastRing) return;  // a ring while hidden stays silent
       this._heardRing = this._lastRing;
       this._listenStarting = true;
       try {
         const ctx = await this._unlockedContext();
         if (!ctx) return;
         ctx.close();
+        if (this._hidden) return;
         this._audible ||= "auto";
         this._render();
       } finally {
@@ -762,16 +770,44 @@ customElements.whenDefined(VIMAR).then(() => {
       this._card.classList.remove("clip");
     }
 
-    disconnectedCallback() {
-      super.disconnectedCallback();
+    _hidden = pageGone();  // no live, no audio (see pageGone)
+
+    // On window: pagehide/pageshow fire there, visibilitychange bubbles up from document. pageshow = back from
+    // the iOS back-forward cache, where no visibilitychange may follow.
+    // App closed or in the background (iOS keeps WebRTC and AudioContext audio playing there): talk over, live
+    // closed, the clip stopped; nothing restarts until the page is back, then live comes back muted.
+    _onPageState = (e) => {
+      const hidden = pageGone(e);
+      if (hidden === this._hidden) return;
+      this._hidden = hidden;
+      if (hidden) this._goQuiet();
+      if (this._root && this._hass) this._render();  // hidden: _setVideo closes the live; visible: reconnects it
+    };
+
+    _goQuiet() {
       this._stopClip();
+      // iOS can keep playing a detached <video>'s audio: mute it and drop the stream before closing.
+      if (this._v) { this._v.muted = true; this._v.srcObject = null; }
+      this._closePeer();  // + talk (_endMic): mic, its PeerConnection, the ear fetch, the AudioContext
+      this._session = null;
+      this._audible = this._audioBlocked = false;
+      this._retry = 0;
+    }
+
+    connectedCallback() {
+      for (const e of PAGE_EVENTS) window.addEventListener(e, this._onPageState);
+      this._hidden = pageGone();
+      super.connectedCallback();
+    }
+
+    disconnectedCallback() {
+      for (const e of PAGE_EVENTS) window.removeEventListener(e, this._onPageState);
+      super.disconnectedCallback();
       if (this._sheet?.open) this._sheet.close();
       clearTimeout(this._ringT);
       clearInterval(this._lineT);
       this._lineT = this._lineAt = null;
-      this._closePeer();
-      this._session = null;
-      this._retry = 0;
+      this._goQuiet();
       this._live = undefined;  // recreated on return
     }
   }
