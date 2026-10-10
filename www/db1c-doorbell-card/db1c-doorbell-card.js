@@ -546,9 +546,9 @@ customElements.whenDefined(VIMAR).then(() => {
     _newVideo() {
       const v = document.createElement("video");
       v.autoplay = v.playsInline = v.muted = true;
-      v.onplaying = () => this._v === v && this._onVideo();  // not a background retry still detached
-      // Fit: the stream's shape. iOS may skip "resize" for a MediaStream: loadedmetadata and playing set it too.
-      v.onresize = v.onloadedmetadata = () => this._v === v && this._shape(v.videoWidth, v.videoHeight);
+      // First frame = connected: "playing", or loadedmetadata/resize with a size (WebKit may never fire "playing"
+      // for a MediaStream). Not for a background retry still detached (_probe).
+      v.onplaying = v.onloadedmetadata = v.onresize = () => this._v === v && v.videoWidth && this._onVideo();
       return v;
     }
 
@@ -582,13 +582,22 @@ customElements.whenDefined(VIMAR).then(() => {
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.addTransceiver("audio", { direction: "recvonly" });
       const ms = new MediaStream();
-      pc.ontrack = (e) => { ms.addTrack(e.track); v.srcObject = ms; };
+      // srcObject once (a second assignment reloads the element: AbortError, paused again) and play() right after
+      // it, never before: a play() on an element that still has no source leaves WebKit stuck (no frame, no event).
+      pc.ontrack = (e) => { ms.addTrack(e.track); if (!v.srcObject) { v.srcObject = ms; v.play().catch(() => {}); } };
       const fail = (why) => this._pc === pc && (this._connected ? this._drop(why) : this._fallback(why));
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed") fail("ICE failed");
         else if (pc.connectionState === "connected" && this._fellBack && this._pc === pc) this._leaveFallback(v);
       };
-      this._connT = setTimeout(() => !this._connected && fail("timeout"), CONNECT_MS);
+      // No "connected" in time. Frames without the event: connected. ICE up but no frame: retried like a drop
+      // (2, 4, 8 s, then HA's stream), not straight to HA's stream: that blanked all the cards on the iPhone.
+      // ICE not through (away from home): HA's stream.
+      this._connT = setTimeout(() => {
+        if (this._connected || this._pc !== pc) return;
+        if (this._v === v && v.videoWidth) this._onVideo();
+        else fail(pc.connectionState === "connected" ? "no video" : "timeout");
+      }, CONNECT_MS);
       this._signal(pc, fail);
     }
 
@@ -632,9 +641,10 @@ customElements.whenDefined(VIMAR).then(() => {
         this._pc = null;
         return;
       }
-      // Retry first (2, 4, 8 s) after a drop, or a first ICE failure (happens now and then at home); else HA's stream at once.
+      // Retry first (2, 4, 8 s) after a drop, a first ICE failure (happens now and then at home) or ICE up with no
+      // frame; else (timeout: away from home) HA's stream at once.
       const r = this._retry || 0;
-      if (r < 4 && (r || why === "ICE failed")) return this._drop(why);
+      if (r < 4 && (r || why === "ICE failed" || why === "no video")) return this._drop(why);
       console.warn("db1c-doorbell-card: WebRTC unavailable:", why);
       this._closePeer();
       this._retry = 0;
@@ -686,6 +696,7 @@ customElements.whenDefined(VIMAR).then(() => {
       this._card.classList.add("wait");
       this._videoBox.replaceChildren(v);
       v.play().catch(() => {});
+      if (v.videoWidth) this._onVideo();  // its first frame came while detached (_v was not v yet): no event again
     }
 
     // Live dropped (HA/Frigate restart, network change) or failed fast: retried after 2, 4, 8 s;
@@ -749,7 +760,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const v = this._v, ear = this._ws?.ear;
       if (ear) ear.gain.gain.value = this._audible ? 1 : 0;
       const muted = !this._audible || !!ear?.live;
-      if (!v || (v.muted === muted && !v.paused)) return;
+      if (!v || !v.srcObject || (v.muted === muted && !v.paused)) return;  // no source yet: play() waits for it (WebKit)
       v.muted = muted;
       v.play().catch((e) => {
         if (this._v !== v || e.name !== "NotAllowedError") return;  // AbortError: srcObject arriving, not a block
@@ -828,6 +839,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const fail = (why) => {
         if (this._ws?.pc !== pc) return;
         this._err.textContent = `${this._t.mic_err}: ${why}`;
+        if (this._session === "calling") this._session = null;  // no talk channel, no call: not a hang-up UI left behind
         this._stopAudio();
       };
       pc.addTransceiver(track, { direction: "sendonly" });
