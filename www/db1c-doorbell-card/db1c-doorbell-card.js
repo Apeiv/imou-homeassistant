@@ -45,7 +45,8 @@ const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from F
 const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
 const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
 const CONNECT_MS = 8000;  // WebRTC not connected within this (away from home: 8555 is LAN only) -> HA stream, video only
-const PROBE_MS = 60000;   // while on the HA stream, try WebRTC again this often (tab visible only)
+const PROBE_MS = 60000;
+const HLS_RETRY_MS = 5000;  // HA's HLS (fallback) stopped: ask for a new one after this   // while on the HA stream, try WebRTC again this often (tab visible only)
 // Ear buffer: 0.4 s of 8 kHz PCM16 silence in front of _pcmSink, on every underrun. On the bench chunks
 // arrive in 64 ms pairs with gaps up to 200 ms even on LAN; the player's 120 ms lead is not enough.
 const EAR_RATE = 8000;
@@ -121,8 +122,11 @@ const EXTRA_CSS = `
     margin: -18px 0 0 -18px; box-sizing: border-box; border-radius: 50%; border: 3px solid rgba(255,255,255,.3);
     border-top-color: #fff; animation: db1c-spin .9s linear infinite; pointer-events: none; }
   @keyframes db1c-spin { to { transform: rotate(360deg); } }
-  /* HA's stream (fallback): black around the picture, not the theme's card colour. */
-  #video > * { --ha-card-background: #000; --card-background-color: #000; }
+  /* HA's stream (fallback) over the latest picture: the still shows until the stream plays, not a blank box. */
+  ha-card.fb #video > * { --ha-card-background: transparent; --card-background-color: transparent; }
+  ha-card.live.fb .still[src] { display: block; }
+  ha-card.live.fb #video { z-index: 1; }
+  ha-card.live.fb #video > video { background: none; }
   #back { position: absolute; top: 12px; left: 12px; z-index: 4; height: 44px; padding: 0 14px 0 10px; gap: 6px;
     display: inline-flex; align-items: center; border-radius: 22px; font-size: 13px; color: #fff; background: rgba(0,0,0,.45);
     -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
@@ -389,7 +393,7 @@ customElements.whenDefined(VIMAR).then(() => {
         this._cover = !this._cover;
         try { localStorage.setItem(FIT_KEY, this._cover ? "cover" : "contain"); } catch { /* this session only */ }
         this._applyFit();
-        if (this._fellBack) this._setPicture(true);  // HA's card reads fit_mode only when created
+        if (this._fellBack && !this._hls) this._setPicture(true);  // HA's card reads fit_mode only when created
       };
       this._root.querySelector(".media").insertAdjacentHTML("beforeend", CLIP);
       this._root.append(document.createRange().createContextualFragment(SHEET));  // ShadowRoot has no insertAdjacentHTML
@@ -525,6 +529,7 @@ customElements.whenDefined(VIMAR).then(() => {
       if (this._live === live) return;
       this._closePeer();
       this._connected = this._fellBack = false;
+      this._card.classList.remove("fb");
       // Camera's latest picture (Frigate latest.jpg via HA's proxy, ~0.2 s): covers the WebRTC wait (~2 s, waits
       // for the key frame) and is the background at rest.
       const pic = this._hass?.states[this._cfg.camera]?.attributes?.entity_picture;
@@ -635,12 +640,32 @@ customElements.whenDefined(VIMAR).then(() => {
       this._retry = 0;
       this._fellBack = true;
       this._card.classList.remove("wait");
+      this._card.classList.add("fb");
       if (!this._camOnly) this._err.textContent = this._t.video_only;  // a camera has no voice or microphone
-      this._setPicture(true);
+      this._haStream();
       if (this._session === "calling") this._session = "in_call";
       this._probeT = setInterval(this._probe, PROBE_MS);
       document.addEventListener("visibilitychange", this._probe);
       this._render();
+    }
+
+    // HA's stream. A browser with native HLS (Safari, iOS) plays HA's HLS itself: HA's player offers its WebRTC
+    // first, which away from home (8555 is LAN only) neither connects nor fails, a blank box for good (2026-10-10).
+    // Else HA's card. Not _newVideo: this one is no WebRTC attempt (_v, _onVideo).
+    async _haStream() {
+      if (!document.createElement("video").canPlayType("application/vnd.apple.mpegurl")) return this._setPicture(true);
+      const req = (this._hlsReq = {});
+      const url = await this._hass.callWS({ type: "camera/stream", entity_id: this._cfg.camera }).then((r) => r.url, () => null);
+      if (!this._fellBack || this._hlsReq !== req) return;  // WebRTC came back, the live closed, or a newer fallback
+      if (!url) return this._setPicture(true);
+      this._stopHls();
+      const v = (this._hls = document.createElement("video"));
+      v.autoplay = v.playsInline = v.muted = true;
+      v.onloadedmetadata = () => this._shape(v.videoWidth, v.videoHeight, false);
+      // HA closed the stream (restart, idle, network): a new one in a while, the still shows meanwhile.
+      v.onerror = v.onended = () => this._hls === v && setTimeout(() => this._hls === v && this._haStream(), HLS_RETRY_MS);
+      v.src = url;
+      this._videoBox.replaceChildren(v);
     }
 
     // On HA's stream: try WebRTC again in the background; HA's stream stays until it connects.
@@ -651,6 +676,8 @@ customElements.whenDefined(VIMAR).then(() => {
     // A background retry got through: from HA's stream back to WebRTC (onplaying -> _onVideo does the rest).
     _leaveFallback(v) {
       this._fellBack = false;
+      this._card.classList.remove("fb");
+      this._stopHls();
       clearInterval(this._probeT);
       document.removeEventListener("visibilitychange", this._probe);
       this._v = v;
@@ -673,7 +700,15 @@ customElements.whenDefined(VIMAR).then(() => {
       this._render();  // microphone button off at once
     }
 
+    // iOS keeps loading (and playing) a detached <video>: _haStream's one is stopped when it leaves.
+    _stopHls() {
+      this._hls?.removeAttribute("src");
+      this._hls?.load();
+      this._hls = null;
+    }
+
     _closePeer() {
+      this._stopHls();
       clearTimeout(this._connT);
       clearTimeout(this._retryT);
       clearInterval(this._probeT);
