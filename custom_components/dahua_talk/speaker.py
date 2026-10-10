@@ -184,12 +184,14 @@ class Speaker:
             try:
                 try:
                     async for khuc in chunks:
-                        if huy.is_set():
+                        # kênh nói chết giữa chừng: đừng nuốt nguồn câm mãi. Chỉ kiểm khi nguồn có khúc mới (mic thẻ
+                        # gửi đều, cả lúc im); nguồn im hẳn thì chờ ở ``async for``, tới khi cúp máy.
+                        if huy.is_set() or viec.done():
                             break
                         hang.put(khuc)
                 finally:
                     hang.put(None)          # luôn đóng phiên nói, kể cả khi nguồn hỏng
-                    if huy.is_set() and hasattr(chunks, "aclose"):
+                    if (huy.is_set() or viec.done()) and hasattr(chunks, "aclose"):
                         await chunks.aclose()   # dừng giữa chừng: tắt ffmpeg ngay, đừng chờ dọn rác
                 return await viec
             except asyncio.CancelledError:

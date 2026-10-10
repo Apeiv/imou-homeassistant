@@ -47,6 +47,8 @@ const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from F
 const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
 const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
 const RATE = 8000;  // call audio, both ways
+const FRAME_TIMEOUT = 8000;  // ms for a first picture after connecting (WebSocket + go2rtc's first keyframe, ~3.5 s on the DB1C) before starting over
+const MODE_OUT_MS = 60000;  // a mode that gave no picture is left out of the next connections for this long
 const LAN = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/.test(location.hostname);
 const REQUIRED = ["camera", "stream", "frigate_camera"];  // + speaker with ring (the doorbell)
 const DEFAULTS = {
@@ -202,7 +204,8 @@ const LIVE = ["ringing", "calling", "in_call"];
 const PAGE_EVENTS = ["visibilitychange", "pagehide", "pageshow"];  // listened on window, see _onPageState
 // Page left (pagehide) or, on phones/tablets, app in the background (hidden). On a desktop a hidden tab keeps
 // the call going: switching tabs must not hang up.
-const TOUCH = matchMedia("(pointer: coarse)").matches;
+const TOUCH = matchMedia("(pointer: coarse)").matches
+  || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));  // + iPad with a trackpad (not touch laptops)
 const pageGone = (e) => e?.type === "pagehide" || (TOUCH && document.visibilityState === "hidden");
 const dur = (e, T) => {
   if (!e.end_time) return T.ongoing;
@@ -219,34 +222,138 @@ customElements.whenDefined(VIMAR).then(() => {
 
   // go2rtc's player with HA's signed URL: a signature lasts 30 s, so every (re)connection signs again
   // (`sign` resolves to the ws(s):// URL). No controls, muted until _applyAudio says otherwise; page visibility is
-  // the card's (_onPageState). Closed, the "empty src" error of its own ondisconnect is not logged (capture: before
-  // the player's listener). play() = the player's, plus `onblocked` when an unmuted play is refused (iOS without a
-  // tap). MJPEG has no video events: `onframe` on the first picture.
+  // the card's (_onPageState). play() = the player's, plus `onblocked` when an unmuted play is refused (iOS without
+  // a tap).
+  // A picture = a presented frame (requestVideoFrameCallback: iOS 15.4+, Chrome, Firefox 132+; else timeupdate),
+  // never "resize"/"loadedmetadata": the MSE init segment alone fires them. `onframe` = first picture of a
+  // connection; `onreset` = connecting without one (the card: still, "connecting…").
+  // One clock: no picture for FRAME_TIMEOUT (re-armed by every frame) = close everything and connect again at once
+  // (_restart): a stall, a mute WebSocket, a stuck peer. go2rtc runs MSE and WebRTC together on the one WebSocket:
+  // the first to paint keeps the <video> (WebRTC replaces only an MSE that has painted nothing: no still or black
+  // in between). An opening with no picture leaves out, for MODE_OUT_MS, WebRTC if it was tried and MSE if it
+  // failed to decode: the next ones fall back down to MJPEG, and a transient failure is not forever.
+  // Errors of the <video>: only an MSE decode error counts (the base would close the WebSocket, also while WebRTC
+  // negotiates on it): with no peer it restarts now, else WebRTC or the clock decide.
+  // The base player's own reconnects come through onconnect. video-rtc.js v1.6.0, unmodified.
   customElements.get(VIDEO) || customElements.define(VIDEO, class extends VideoRTC {
     oninit() {
       this.visibilityCheck = false;
+      this.RECONNECT_TIMEOUT = 3000;  // the base's 15 s: back from the background HA's WebSocket is often gone
+      this.out = {};  // mode -> left out until (ms)
       super.oninit();
       this.video.controls = false;
       this.video.muted = true;
-      this.addEventListener("error", (e) => !this.ws && !this.pc && e.stopPropagation(), true);
+      this.addEventListener("error", (e) => {  // capture: before the base's listener
+        e.stopPropagation();
+        const err = this.video.error;  // 4 = the "empty src" of a (re)connection: not news
+        if (err && err.code !== 4) console.warn("db1c-doorbell-card: video error", err.code, err.message);
+        if (err?.code !== 3 || this.video.srcObject) return;  // srcObject: WebRTC's picture, not MSE's
+        this.mseBad = true;
+        if (!this.pc) this._restart();
+      }, true);
+      if (!this.video.requestVideoFrameCallback) return this.video.addEventListener("timeupdate", () => this._frame());
+      const tick = () => { this.video.requestVideoFrameCallback(tick); this._frame(); };  // re-requested first: never dies
+      this.video.requestVideoFrameCallback(tick);
     }
 
     onconnect() {
+      // A peer still negotiating without its WebSocket (go2rtc's offer error, ICE stuck) can't finish: it goes.
+      if (this.pc && this.pcState !== WebSocket.OPEN && !this.ws) {
+        this.pc.close();
+        this.pc = null;
+        this.pcState = WebSocket.CLOSED;
+      }
       if (!this.isConnected || !this.sign || this.ws || this.pc || this.signing) return false;
-      this.signing = this.sign()
+      let tid;
+      const late = new Promise((_, no) => { tid = setTimeout(() => no(new Error("no answer in 5 s")), 5000); });
+      this.signing = Promise.race([this.sign(), late])
         .then((url) => {
+          if (!this.isConnected) return;  // closed while signing
           this.wsURL = url;
-          if (!document.hidden) super.onconnect();
+          this.video.srcObject = null;  // the last connection's buffered picture is not this one's first
+          this.video.src = "";
+          const now = Date.now();
+          this.mode = ["webrtc", "mse", "mjpeg"].filter((m) => !(this.out[m] > now)).join(",");
+          this.mseBad = false;
+          this.onreset?.();
+          this._arm();
+          super.onconnect();
         }, (e) => {
           console.warn("db1c-doorbell-card: signing failed:", e.message || e);
           this.reconnectTID = setTimeout(() => this.onconnect(), this.RECONNECT_TIMEOUT);
         })
-        .finally(() => { this.signing = null; });
+        .finally(() => { clearTimeout(tid); this.signing = null; });
       return true;
     }
 
+    onclose() {  // the close of a WebSocket _restart left behind: the current one is not touched
+      if (this.ws && this.ws.readyState < WebSocket.CLOSING) return false;
+      return super.onclose();
+    }
+
+    onpcvideo(video2) {
+      const pc = this.pc;
+      if (pc && this.framed) {  // MSE already paints: it keeps the <video> (the call's voice has its own WebSocket)
+        pc.close();
+        this.pc = null;
+        this.pcState = WebSocket.CLOSED;
+        video2.srcObject = null;
+        return;
+      }
+      // The DB1C's audio reaches WebRTC first: "loadeddata" fires while its video still waits for a keyframe (the
+      // camera's GOP, ~3 s). The swap waits for WebRTC's first picture (a size: playing, muted, or a detached paused
+      // element may never decode one); its peer gone meanwhile, it never comes.
+      if (pc && !video2.videoWidth) {
+        video2.addEventListener("resize", () => {
+          if (this.pc === pc) this.onpcvideo(video2);
+          else video2.srcObject = null;
+        }, { once: true });
+        video2.muted = true;
+        return video2.play().catch(() => {});
+      }
+      super.onpcvideo(video2);
+      // WebRTC took the <video>: its own clock. After this frame's callbacks: a requestVideoFrameCallback pending
+      // for the MSE element's last state would count as WebRTC's.
+      if (this.pcState === WebSocket.OPEN) requestAnimationFrame(() => this.pcState === WebSocket.OPEN && this._arm());
+    }
+
     ondisconnect() {
+      clearTimeout(this.wdTID);
       if (this.video) super.ondisconnect();  // never connected: nothing to close
+    }
+
+    _frame() {
+      const first = !this.framed;
+      this._arm();
+      this.framed = true;
+      if (first) this.onframe?.();
+    }
+
+    _arm() {
+      this.framed = false;
+      clearTimeout(this.wdTID);
+      this.wdTID = setTimeout(() => this._restart(), FRAME_TIMEOUT);
+    }
+
+    // No picture for FRAME_TIMEOUT: closed and connected again now, without waiting for the old WebSocket's close
+    // (a dead peer may never send it). No blind reconnects where no frames are painted: a hidden tab (desktop), or
+    // a video the browser paused (iOS: out of the viewport, Low Power Mode refusing even a muted play): the clock
+    // starts again on return / on play.
+    _restart() {
+      if (!this.isConnected) return;
+      if (document.hidden) return document.addEventListener("visibilitychange", () => this._arm(), { once: true });
+      if (this.video.paused && this.video.readyState >= 2) {
+        return this.video.addEventListener("play", () => this._arm(), { once: true });
+      }
+      if (!this.framed) {
+        const until = Date.now() + MODE_OUT_MS;
+        if (this.mode.includes("webrtc")) this.out.webrtc = until;
+        if (this.mseBad) this.out.mse = until;
+      }
+      clearTimeout(this.reconnectTID);
+      this.reconnectTID = 0;
+      this.ondisconnect();
+      this.onconnect();
     }
 
     play() {
@@ -258,13 +365,12 @@ customElements.whenDefined(VIMAR).then(() => {
       });
     }
 
-    onmjpeg() {
+    onmjpeg() {  // no video events: the first picture is the first frame
       super.onmjpeg();
       const show = this.ondata;
       this.ondata = (d) => {
         show(d);
-        this.onframe?.();
-        this.onframe = null;
+        this._frame();
       };
     }
   });
@@ -323,7 +429,8 @@ customElements.whenDefined(VIMAR).then(() => {
     _trackRing(h) {
       if (this._camOnly) return;  // a ring_time alone does not ring a camera
       const r = h.states[this._cfg.ring];
-      this._ringOn = r?.state === "on";
+      // "on" for over twice the ring window = left on (HA restarted during the automation's delay): no ring.
+      this._ringOn = r?.state === "on" && Date.now() - Date.parse(r.last_changed) < 2 * this._cfg.ring_timeout * 1000;
       const t = h.states[this._cfg.ring_time]?.attributes?.timestamp;  // epoch s: Safari can't Date.parse("YYYY-MM-DD hh:mm")
       const at = t ? t * 1000 : !r ? null : r.entity_id.startsWith("event.") ? Date.parse(r.state)
         : this._ringOn ? Date.parse(r.last_changed) : null;
@@ -334,9 +441,9 @@ customElements.whenDefined(VIMAR).then(() => {
     }
 
     _vstate() {
+      if (this._session) return this._session;  // the call goes through dahua_talk, not Frigate: a camera blip doesn't end it
       const cam = this._hass?.states[this._cfg.camera];
       if (!cam || cam.state === "unavailable") return "offline";
-      if (this._session) return this._session;
       const r = this._lastRing, fresh = r && Date.now() - r < this._cfg.ring_timeout * 1000;
       return r && r !== this._declined && (this._ringOn || fresh) ? "ringing" : "idle";
     }
@@ -352,7 +459,8 @@ customElements.whenDefined(VIMAR).then(() => {
         this._cancelled = this._state === "calling";
         this._session = null;
       } else {  // call / answer
-        this._session = service === "answer" || this._connected || this._fellBack ? "in_call" : "calling";
+        // in_call = the server's "ready" (_openAudio); no microphone API (HTTP, webview): answered with video only
+        this._session = window.isSecureContext && navigator.mediaDevices?.getUserMedia ? "calling" : "in_call";
       }
       this._render();
     }
@@ -381,6 +489,7 @@ customElements.whenDefined(VIMAR).then(() => {
       // always_live: the Vimar card chose "live" only for ring/call; here it holds at rest too.
       this._card.classList.toggle("live", !!this._live);
       this._open.hidden = !this._list().length;  // no lock/shortcut configured: no Open button
+      this._open.disabled = this._hass.states[this._cfg.lock]?.state === "unavailable";  // only the lock counts, not the camera
       // Icon-only rounds (the label stays in the aria-label). On ring Talk stays the microphone, Decline = Ignore.
       const ring = this._state === "ringing";
       const call = this._ws;  // Talk = Answer; during the call it mutes the microphone
@@ -571,7 +680,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const T = this._t;
       this._badge.textContent = this._err.textContent || (s === "ringing" ? `${T.ringing} · ${mmss(this._lastRing)}`
         : s === "in_call" ? `${T.on_call} · ${mmss(this._lineAt)}`
-        : s === "calling" ? T.connecting
+        : s === "calling" || (this._live && !this._connected) ? T.connecting  // live without a picture yet
         : this._lastRing ? `${T.rang} ${hhmm(this._lastRing, T)}` : T.live);
     }
 
@@ -579,7 +688,9 @@ customElements.whenDefined(VIMAR).then(() => {
     // events); at rest the Vimar card (picture-entity of the camera).
     // Never with the page hidden (_onPageState): iOS keeps WebRTC audio playing in the background.
     _setVideo(live) {
-      const always = !!this._cfg.always_live && this._state !== "offline" && (!this._popup || this._pop.open);
+      // Not closed when the camera entity is unavailable: Frigate drops it for 10-20 s at times while go2rtc
+      // still streams; a really dead stream is the player's clock's (still + "connecting…").
+      const always = !!this._cfg.always_live && (!this._popup || this._pop.open);
       live = !this._hidden && (live || always);
       if (this._live === live) return;
       this._closePeer();
@@ -593,16 +704,22 @@ customElements.whenDefined(VIMAR).then(() => {
       this._video = null;
       this._card.classList.add("wait");
       const el = (this._rtc = document.createElement(VIDEO));
-      el.mode = "webrtc,mse,mjpeg";
       el.media = "video,audio";
       el.sign = () => this._hass.callWS({ type: "auth/sign_path", expires: 30,
         path: `/api/frigate/${this._cfg.frigate_instance}/mse/api/ws?src=${encodeURIComponent(this._cfg.stream)}` })
         .then(({ path }) => location.origin.replace(/^http/, "ws") + path);
-      // First frame: "playing", or loadeddata/resize with a size (WebKit may never fire "playing" for a MediaStream).
-      // Caught on the player (capture): its <video> exists only once the card is in the page. _v from then on.
-      const first = (v) => { if (this._rtc === el && (v.videoWidth || v.poster)) { this._v = v; this._onVideo(); } };
-      for (const t of ["playing", "loadeddata", "resize"]) el.addEventListener(t, (e) => first(e.target), true);
-      el.onframe = () => first(el.video);
+      // First real picture (the player's `onframe`): the still goes, "live" (_connected = a picture has been seen).
+      // _v from then on. Connecting (again) without one: the still and "connecting…" again.
+      el.onframe = () => { if (this._rtc === el) { this._v = el.video; this._onVideo(); } };
+      el.onreset = () => {
+        if (this._rtc !== el) return;
+        this._connected = false;
+        this._v = null;
+        const pic = this._hass?.states[this._cfg.camera]?.attributes?.entity_picture;  // the latest, not the opening's
+        if (pic) this._still.src = pic;
+        this._card.classList.add("wait");
+        this._render();
+      };
       el.onblocked = () => {  // unmuted without a real tap (iOS): back to muted, the speaker button asks for the tap
         if (this._rtc !== el) return;
         this._audible = false;
@@ -630,7 +747,6 @@ customElements.whenDefined(VIMAR).then(() => {
       this._shape(this._v?.videoWidth, this._v?.videoHeight);
       this._connected = true;
       this._card.classList.remove("wait");
-      if (this._session === "calling") this._session = "in_call";
       this._render();
     }
 
@@ -667,9 +783,9 @@ customElements.whenDefined(VIMAR).then(() => {
     // comes from the call WebSocket: the <video> stays quiet. iOS pauses media elements when mic capture
     // starts/stops: the player's play() restarts it; an unmuted play it refuses comes back as onblocked.
     _applyAudio() {
-      const v = this._v, ear = this._ws?.ear;
-      if (ear) ear.gain.value = this._audible ? 1 : 0;
-      const muted = !this._audible || !!ear;
+      const v = this._v, ear = this._ws?.ear, clip = !!this._clipV && !this._clipV.hidden;  // a clip open: only the clip is heard
+      if (ear) ear.gain.value = this._audible && !clip ? 1 : 0;
+      const muted = !this._audible || !!ear || clip;
       if (!v || (v.muted === muted && !v.paused)) return;
       v.muted = muted;
       this._rtc.play();
@@ -680,8 +796,13 @@ customElements.whenDefined(VIMAR).then(() => {
     // server's "ready" (10 s at most); no "ready" (no endpoint, busy = close 4409) = no call, said in words, video
     // untouched. Hung up or gone to the background meanwhile (_endMic closed it): just the cleanup.
     async _openAudio(mic, ctx) {
-      if (!this.isConnected) throw new Error("card closed");
+      if (!this.isConnected || this._hidden) {  // hidden: never a microphone to the door
+        this._session = null;  // nothing for _endMic to close: "calling" would stay
+        throw new Error("card closed");
+      }
       ctx.resume().catch(() => {});  // iOS: with the microphone the audio session changes and the context may stay suspended
+      // iOS: a phone call, Siri or a new output suspends it again: back on, while it is this call's
+      ctx.onstatechange = () => ctx.state === "suspended" && this._ws?.ctx === ctx && ctx.resume().catch(() => {});
       const T = this._t;
       const dial = (this._dialing = { close() { this.gone = true; } });  // hung up while signing: _endMic marks it
       const { path } = await this._hass.callWS({ type: "auth/sign_path", expires: 30,
@@ -711,6 +832,9 @@ customElements.whenDefined(VIMAR).then(() => {
       }
       const ear = ctx.createGain();  // volume set by _applyAudio
       ear.connect(ctx.destination);
+      // _ws = the call (the base card only checks it for truthiness), set before anything that may throw: the
+      // Vimar catch -> _stopAudio -> _endMic then closes it all. `audible` = the listen state before, restored by _endMic.
+      this._ws = { sock: ws, mic, ctx, ear, audible: this._audible };
       const sink = this._earSink(ctx, ear, this._cfg.ear_buffer ?? (LAN ? 0.12 : 0.5));
       ws.onmessage = (e) => typeof e.data !== "string" && sink(e.data);
       ws.onclose = (e) => {
@@ -724,7 +848,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const proc = ctx.createScriptProcessor(2048, 1, 1);
       const step = ctx.sampleRate / RATE;
       proc.onaudioprocess = (ev) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
+        if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 8192) return;  // slow uplink: drop, don't queue delay
         const inp = ev.inputBuffer.getChannelData(0);
         const n = Math.floor(inp.length / step);
         const out = new Uint8Array(1 + n * 2);
@@ -741,8 +865,7 @@ customElements.whenDefined(VIMAR).then(() => {
       };
       source.connect(proc);
       proc.connect(ctx.destination);  // needed for onaudioprocess to run (outputs silence)
-      // _ws = the call; the base card only checks it for truthiness. `audible` = the listen state before, restored by _endMic.
-      this._ws = { sock: ws, mic, ctx, ear, audible: this._audible };
+      this._session = "in_call";  // the server's "ready" is the answer
       this._audible = true;  // talking = hearing
       this._audioBlocked = false;
       this._render();
@@ -761,7 +884,7 @@ customElements.whenDefined(VIMAR).then(() => {
       return (data) => {
         if (new Uint8Array(data, 0, 1)[0] !== 0x01) return;
         const pcm = new Int16Array(data.slice(1, 1 + ((data.byteLength - 1) & ~1))), n = pcm.length;
-        if (!n) return;
+        if (!n || playAt - ctx.currentTime > ahead + 0.3) return;  // a burst after a stall: dropped, the delay stays `ahead`
         const at = (i) => (i < 0 ? last : pcm[i] / 32768);  // index -1 is the previous packet's last sample
         const count = Math.ceil((n - pos) / step);
         const buf = ctx.createBuffer(1, count, ctx.sampleRate);
@@ -786,10 +909,12 @@ customElements.whenDefined(VIMAR).then(() => {
       };
     }
 
+    // Session and call resources die together: whatever closes the call WebSocket ends the session.
     _endMic() {  // no redraw: _closePeer calls it from inside _render too (_stopAudio's redraw runs _applyAudio)
+      const a = this._ws;
+      if (a || this._dialing) this._session = null;
       this._dialing?.close();  // a call still waiting for "ready": _openAudio sees it and cleans up
       this._dialing = null;
-      const a = this._ws;
       this._ws = null;
       if (!a) return false;
       if (this._audible === true) this._audible = a.audible;  // call over: listening back as before (unless muted meanwhile)
@@ -872,6 +997,7 @@ customElements.whenDefined(VIMAR).then(() => {
       v.load();  // the previous clip stops now, not when the new one arrives
       v.muted = false;
       v.hidden = this._back.hidden = false;
+      this._applyAudio();
       this._card.classList.add("clip");
       this._card.classList.toggle("cload", !!e.has_clip);
       this.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -911,6 +1037,7 @@ customElements.whenDefined(VIMAR).then(() => {
       v.removeAttribute("poster");
       v.load();
       v.hidden = this._back.hidden = true;
+      this._applyAudio();
       this._card.classList.remove("clip");
     }
 
@@ -941,17 +1068,23 @@ customElements.whenDefined(VIMAR).then(() => {
       super.connectedCallback();
     }
 
+    // Next task: moved in the page (masonry rebuilding its columns when the phone rotates) = back already, the
+    // call goes on.
     disconnectedCallback() {
-      for (const e of PAGE_EVENTS) window.removeEventListener(e, this._onPageState);
-      super.disconnectedCallback();
-      if (this._sheet?.open) this._sheet.close();
-      this._dragStop?.abort();  // a drag in progress leaves no window listeners behind
-      clearTimeout(this._sheetT);
-      clearTimeout(this._ringT);
-      clearInterval(this._lineT);
-      this._lineT = this._lineAt = null;
-      this._goQuiet();
-      this._live = undefined;  // recreated on return
+      clearTimeout(this._dcT);  // detached twice before the task: one cleanup
+      this._dcT = setTimeout(() => {
+        if (this.isConnected) return;
+        for (const e of PAGE_EVENTS) window.removeEventListener(e, this._onPageState);
+        super.disconnectedCallback();
+        if (this._sheet?.open) this._sheet.close();
+        this._dragStop?.abort();  // a drag in progress leaves no window listeners behind
+        clearTimeout(this._sheetT);
+        clearTimeout(this._ringT);
+        clearInterval(this._lineT);
+        this._lineT = this._lineAt = null;
+        this._goQuiet();
+        this._live = undefined;  // recreated on return
+      });
     }
   }
 

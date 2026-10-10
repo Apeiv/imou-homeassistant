@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import hmac
 import logging
 import time
@@ -31,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import WSMsgType, web
 
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -266,8 +267,10 @@ class NgheView(HomeAssistantView):
         return resp
 
 
-#: Mục đang có cuộc gọi qua ``CallView`` — mỗi mục một cuộc.
-_DANG_GOI: set[str] = set()
+#: Mục đang có cuộc gọi qua ``CallView`` — mỗi mục một cuộc: entry_id → (WebSocket, user id).
+_DANG_GOI: dict[str, tuple[web.WebSocketResponse, str]] = {}
+#: Cuộc cũ đã ngắt / cùng người dùng gọi lại: chờ cuộc cũ nhả loa tối đa ngần này giây rồi mới báo bận.
+CHO_NHA_GIAY = 5.0
 #: Byte đầu mỗi khung nhị phân của ``CallView``: tiếng camera xuống thẻ / mic thẻ lên loa camera.
 KHUNG_XUONG = b"\x01"
 KHUNG_LEN = b"\x02"
@@ -292,18 +295,28 @@ class CallView(HomeAssistantView):
         entry, nghe = _nghe_theo_entity(hass, entity_id)
         if nghe is None:
             return web.Response(status=404)
-        # Ping 30 s: Cloudflare đóng WebSocket lặng ~100 s. Khung 64 KiB là thừa cho mic (~4 s PCM 8 kHz).
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 16)
-        loa = entry.runtime_data.speaker
-        if entry.entry_id in _DANG_GOI or loa.playing:     # TTS, thông báo hay bộ đàm go2rtc đang giữ loa
+        # Ping 15 s (pong 7,5 s): thẻ biến mất (Wi-Fi → 5G) thì ≤ 23 s là nhả loa, mà 5G/tunnel khựng vài giây không
+        # rớt cuộc gọi; Cloudflare đóng WebSocket lặng ~100 s. Khung 64 KiB là thừa cho mic (~4 s PCM 8 kHz).
+        ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1 << 16)
+        loa, ma, user = entry.runtime_data.speaker, entry.entry_id, request[KEY_HASS_USER].id
+        cu = _DANG_GOI.get(ma)
+        if cu and (cu[0].closed or cu[1] == user):  # vừa cúp rồi gọi lại, hay chính người ấy từ máy khác: thay cuộc cũ
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(CHO_NHA_GIAY):
+                    if cu[0].prepared:              # chưa prepare thì close() ném RuntimeError: chỉ chờ
+                        await cu[0].close()
+                    while ma in _DANG_GOI or loa.playing:
+                        await asyncio.sleep(0.05)
+        if ma in _DANG_GOI or loa.playing:           # người khác đang gọi; TTS, thông báo hay bộ đàm go2rtc giữ loa
             await ws.prepare(request)
             await ws.close(code=MA_BAN)
             return ws
-        _DANG_GOI.add(entry.entry_id)
+        _DANG_GOI[ma] = (ws, user)
         try:
             await self._goi(hass, request, ws, entry, nghe)
         finally:
-            _DANG_GOI.discard(entry.entry_id)        # lỗi gì cũng không để mục "bận" mãi
+            if _DANG_GOI.get(ma, (None,))[0] is ws:  # lỗi gì cũng không để mục "bận" mãi; mục của cuộc mới thì để
+                del _DANG_GOI[ma]
         return ws
 
     async def _goi(self, hass: HomeAssistant, request: web.Request, ws: web.WebSocketResponse,

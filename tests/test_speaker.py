@@ -4,11 +4,14 @@
 câu; phát hết hàng đợi đúng nhịp thì cả lượt nói trễ theo — chủ máy: "bị trễ so với thực tế".
 """
 
+import asyncio
 import math
 import queue
 import struct
 import threading
 import time
+
+import pytest
 
 from custom_components.dahua_talk import speaker
 
@@ -109,8 +112,6 @@ def test_co_huy_dung_giua_bai():
 
 async def test_bi_huy_thi_luong_phat_thoat_ngay(hass):
     """Đo 30/09/2026: HA mất 1 phút mới tắt được vì luồng phát YouTube ra loa camera còn gửi dở."""
-    import asyncio
-
     dong = threading.Event()
 
     class _PhienDong(_Phien):
@@ -132,6 +133,26 @@ async def test_bi_huy_thi_luong_phat_thoat_ngay(hass):
     except asyncio.CancelledError:
         pass
     assert await hass.async_add_executor_job(dong.wait, 1.0), "luồng phát phải đóng kênh ngay khi bị huỷ"
+    assert not loa.playing
+
+
+async def test_kenh_noi_chet_thi_bao_loi_ngay_du_nguon_con_chay(hass):
+    """DB1C bận / đăng nhập hỏng: phiên nói chết ngay mà nguồn sống (mic thẻ) chạy mãi — phải báo lỗi lên,
+    không nuốt tiếng câm tới lúc cúp máy với ``playing`` vẫn bật."""
+    class _PhienHong(_Phien):
+        def __enter__(self):
+            raise OSError("camera bận")
+
+    loa = speaker.Speaker(hass, lambda: _PhienHong(0.0))
+
+    async def mic():
+        while True:
+            yield (time.monotonic(), _im(KHUC)[0])
+            await asyncio.sleep(KHUC)
+
+    with pytest.raises(OSError):
+        async with asyncio.timeout(2):
+            await loa.async_play_pcm(mic(), TS, song=True)
     assert not loa.playing
 
 

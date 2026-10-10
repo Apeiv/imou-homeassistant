@@ -330,14 +330,14 @@ async def test_call_ws_hai_chieu_va_chi_mo_kenh_khi_co_0x02(hass, hass_client):
     assert not nghe.nguoi_nghe
 
 
-async def test_call_ws_cuoc_thu_hai_bao_ban(hass, hass_client):
+async def test_call_ws_cuoc_thu_hai_bao_ban(hass, hass_client, hass_read_only_access_token):
     muc = _hik()
     await _nap(hass, muc)
     client = await hass_client()
     duong = f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}"
     ws1 = await client.ws_connect(duong)
     assert await ws1.receive_json() == {"type": "ready"}
-    ws2 = await client.ws_connect(duong)
+    ws2 = await (await hass_client(hass_read_only_access_token)).ws_connect(duong)   # người khác
     assert (await ws2.receive()).type == aiohttp.WSMsgType.CLOSE and ws2.close_code == intercom.MA_BAN
     assert len(muc.runtime_data.mic_camera.nguoi_nghe) == 1
     await ws1.close()
@@ -345,6 +345,41 @@ async def test_call_ws_cuoc_thu_hai_bao_ban(hass, hass_client):
     ws3 = await client.ws_connect(duong)
     assert await ws3.receive_json() == {"type": "ready"}
     await ws3.close()
+    await _cho_het_goi(muc)
+
+
+async def test_call_ws_cung_nguoi_goi_lai_thi_thay_cuoc_cu(hass, hass_client):
+    """Cùng người dùng (máy khác, hay thẻ chưa kịp đóng cuộc cũ): cuộc cũ đóng, cuộc mới vào — không tự báo bận."""
+    muc = _hik()
+    await _nap(hass, muc)
+    client = await hass_client()
+    duong = f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}"
+    ws1 = await client.ws_connect(duong)
+    assert await ws1.receive_json() == {"type": "ready"}
+    ws2 = await client.ws_connect(duong)
+    assert await ws2.receive_json() == {"type": "ready"}
+    assert (await ws1.receive()).type == aiohttp.WSMsgType.CLOSE
+    assert len(muc.runtime_data.mic_camera.nguoi_nghe) == 1
+    await ws2.close()
+    await _cho_het_goi(muc)
+
+
+async def test_call_ws_vua_cup_thi_cho_nha_loa_khong_bao_ban(hass, hass_client, hass_read_only_access_token):
+    """Cúp rồi gọi ngay (người khác cũng vậy): cuộc cũ còn đang nhả loa (tới 5 s) — chờ nó, không 4409."""
+    muc = _hik()
+    await _nap(hass, muc)
+    duong = f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}"
+    ws1 = await (await hass_client()).ws_connect(duong)
+    assert await ws1.receive_json() == {"type": "ready"}
+
+    async def dong_cham(_self):
+        await asyncio.sleep(0.5)                      # helper HCNetSDK chờ "DONG"
+
+    with mock.patch.object(intercom.Intercom, "async_close", dong_cham):
+        await ws1.close()
+        ws2 = await (await hass_client(hass_read_only_access_token)).ws_connect(duong)
+        assert await ws2.receive_json() == {"type": "ready"}
+    await ws2.close()
     await _cho_het_goi(muc)
 
 
