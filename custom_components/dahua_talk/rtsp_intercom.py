@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import socket
 from urllib.parse import urlsplit
 
 from homeassistant.core import HomeAssistant
@@ -30,7 +31,9 @@ CONG_RTSP = 8557
 _PT_OPUS = 96
 #: Một khối yêu cầu RTSP (dòng đầu + header) dài hơn ngần này là không phải go2rtc — ngắt.
 _TOI_DA_YEU_CAU = 8192
-#: Sau PLAY trình duyệt gửi Opus liên tục (~50 gói/s); im ngần này giây là go2rtc giữ kết nối chết — đóng.
+#: Kênh nói đang mở (hay đã quá ``TOI_DA_NOI_GIAY``) mà im ngần này giây (trình duyệt gửi ~50 gói/s) là
+#: go2rtc giữ kết nối chết — đóng để nhả loa camera. Sau PLAY mà kênh nói đóng thì không hạn: go2rtc giữ
+#: kênh ngược rảnh suốt, đóng là nó nối lại ngay (vòng EOF mỗi 15 s). Kết nối chết lúc rảnh: TCP keepalive.
 _CHO_RTP_GIAY = 15.0
 #: Trước PLAY: ngần này giây không có lệnh nào (khớp ``Session: …;timeout=60``) thì đóng.
 _CHO_LENH_GIAY = 60.0
@@ -110,6 +113,7 @@ class MayChuBoDam:
         sv, self._sv = self._sv, None
         if sv is not None:
             sv.close()
+            sv.close_clients()          # kết nối rảnh không tự hết: đừng để wait_closed chờ mãi
             await sv.wait_closed()
 
     def _loa(self, url: str):
@@ -132,9 +136,17 @@ class MayChuBoDam:
         phien: Intercom | None = None
         giai_ma: GiaiMaOpus | None = None
         try:
+            if (so := w.get_extra_info("socket")) is not None:
+                so.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                for ten, gt in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+                    if hasattr(socket, ten):
+                        so.setsockopt(socket.IPPROTO_TCP, getattr(socket, ten), gt)
             while True:
-                # go2rtc giữ TCP mà không gửi gì (cả RTP lẫn GET_PARAMETER giữ phiên): đóng để nhả loa camera.
-                async with asyncio.timeout(_CHO_RTP_GIAY if phien else _CHO_LENH_GIAY):
+                if phien is None:
+                    cho = _CHO_LENH_GIAY
+                else:
+                    cho = _CHO_RTP_GIAY if phien.dang_noi or phien.het_gio else None
+                async with asyncio.timeout(cho):
                     dau = await r.readexactly(1)
                 if dau == b"$":                      # gói RTP xen trong TCP
                     ch_n = await r.readexactly(3)
@@ -189,7 +201,7 @@ class MayChuBoDam:
                 await w.drain()
                 if ma.startswith(("404", "454")):
                     return
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, TimeoutError):
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError, ValueError):  # TimeoutError là OSError
             pass
         finally:
             if phien is not None:

@@ -142,6 +142,11 @@ class Intercom:
         if self._im >= IM_GIAY:
             self.stop_talking()
 
+    @property
+    def dang_noi(self) -> bool:
+        """Kênh nói đang mở (loa camera bận)."""
+        return self._hang is not None
+
     def stop_talking(self) -> None:
         """Đóng kênh nói (camera nghe lại được). Nói tiếp thì mở lại."""
         if self._hang is not None:

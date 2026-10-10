@@ -169,3 +169,40 @@ async def test_dich_vu_tra_nguon_rtsp_khi_may_chu_chay(hass):
                                             {"entity_id": mp, "ha_url": "http://192.168.1.10:8123"},
                                             blocking=True, return_response=True)
         assert kq["source"] == f"rtsp://192.168.1.10:8557/{muc.entry_id}/{khoa}#backchannel=1"
+
+
+@pytest.mark.may_chu_rtsp
+async def test_ranh_sau_play_giu_ket_noi_dang_noi_ma_im_thi_dong(hass, may_chu):
+    """go2rtc giữ kênh ngược rảnh suốt: không được đóng (đóng là nó nối lại, vòng EOF mỗi 15 s).
+    Kênh nói đang mở mà hết RTP thì vẫn đóng để nhả loa camera."""
+    muc, goc, cong = may_chu
+    url = f"{goc}/{muc.data[intercom.CONF_INTERCOM_KEY]}"
+    tieng = struct.pack("<320h", *(int(3000 * math.sin(2 * math.pi * i / 16)) for i in range(320)))
+    loa = LoaGia()
+
+    async def toi_play():
+        r, w = await asyncio.open_connection("127.0.0.1", cong)
+        await _hoi(r, w, "DESCRIBE", url)
+        await _hoi(r, w, "SETUP", url + "/trackID=0", "Transport: RTP/AVP/TCP;interleaved=0-1\r\n", 2)
+        assert "200 OK" in (await _hoi(r, w, "PLAY", url, "Session: 1\r\n", 3))[0]
+        return r, w
+
+    async def noi_roi_im(r, w):
+        for i in range(5):
+            p = _rtp(tieng, i)
+            w.write(b"$\x00" + struct.pack(">H", len(p)) + p)
+        await w.drain()
+        assert await asyncio.wait_for(r.read(), 2) == b""         # máy chủ đóng sau ~0,2 s
+        w.close()
+
+    with mock.patch.object(Speaker, "async_play_pcm", loa.async_play_pcm), \
+            mock.patch.object(rtsp_intercom, "_CHO_RTP_GIAY", 0.2), \
+            mock.patch.object(rtsp_intercom, "GiaiMaOpus", lambda _tan_so: lambda tai: tai):
+        r, w = await toi_play()
+        await asyncio.sleep(0.5)                                  # rảnh quá hạn: vẫn mở
+        assert "200 OK" in (await _hoi(r, w, "OPTIONS", url, cseq=4))[0]
+        await noi_roi_im(r, w)                                    # có tiếng → mở loa, rồi im hẳn
+        assert len(loa.phien) == 1 and len(loa.phien[0]) == 5 * len(tieng)
+        # Quá ``TOI_DA_NOI_GIAY``: phiên câm tới cuối — im thì đóng, go2rtc nối lại được phiên mới.
+        with mock.patch.object(intercom, "TOI_DA_NOI_GIAY", 0):
+            await noi_roi_im(*await toi_play())
