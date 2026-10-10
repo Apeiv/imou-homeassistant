@@ -49,6 +49,7 @@ const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signa
 const RATE = 8000;  // call audio, both ways
 const FRAME_TIMEOUT = 8000;  // ms for a first picture after connecting (WebSocket + go2rtc's first keyframe, ~3.5 s on the DB1C) before starting over
 const MODE_OUT_MS = 60000;  // a mode that gave no picture is left out of the next connections for this long
+const BG_HOLD_MS = 5000;  // the live stays (muted) this long after the page goes hidden: back sooner, the picture is there
 const LAN = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/.test(location.hostname);
 const REQUIRED = ["camera", "stream", "frigate_camera"];  // + speaker with ring (the doorbell)
 const DEFAULTS = {
@@ -289,6 +290,23 @@ customElements.whenDefined(VIMAR).then(() => {
     onclose() {  // the close of a WebSocket _restart left behind: the current one is not touched
       if (this.ws && this.ws.readyState < WebSocket.CLOSING) return false;
       return super.onclose();
+    }
+
+    // The base reads `sb.buffered` on every updateend, also the one a teardown (src = "") fires on the SourceBuffer
+    // it has just removed: that throws, uncaught, inside the base's closure. The buffer the base adds answers null
+    // instead once removed. The MediaSource is caught on its way to the <video> (blob URL, or srcObject on Safari).
+    onmse() {
+      const url = URL.createObjectURL;
+      let ms;
+      URL.createObjectURL = (o) => (ms = o, url.call(URL, o));
+      try { super.onmse(); } finally { URL.createObjectURL = url; }
+      ms = this.video.srcObject || ms;
+      const add = ms.addSourceBuffer, get = Object.getOwnPropertyDescriptor(SourceBuffer.prototype, "buffered").get;
+      ms.addSourceBuffer = (type) => {
+        const sb = add.call(ms, type);
+        Object.defineProperty(sb, "buffered", { get: () => { try { return get.call(sb); } catch { return null; } } });
+        return sb;
+      };
     }
 
     onpcvideo(video2) {
@@ -686,20 +704,25 @@ customElements.whenDefined(VIMAR).then(() => {
 
     // Live video: go2rtc's player (it plays, reconnects and picks the mode; the card only reads its <video>'s
     // events); at rest the Vimar card (picture-entity of the camera).
-    // Never with the page hidden (_onPageState): iOS keeps WebRTC audio playing in the background.
+    // Page hidden (_onPageState): muted at once (_applyAudio; iOS keeps WebRTC audio playing in the background) and
+    // kept for BG_HOLD_MS, so a quick return paints at once instead of waiting for a new connection and the
+    // camera's next keyframe (~3 s); longer away, closed.
     _setVideo(live) {
       // Not closed when the camera entity is unavailable: Frigate drops it for 10-20 s at times while go2rtc
       // still streams; a really dead stream is the player's clock's (still + "connecting…").
       const always = !!this._cfg.always_live && (!this._popup || this._pop.open);
       live = !this._hidden && (live || always);
       if (this._live === live) return;
+      if (!live && this._hidden && this._rtc) {  // one timer: every redraw while hidden comes through here
+        this._bgT ||= setTimeout(() => { this._bgT = 0; if (this._hidden) this._dropLive(); }, BG_HOLD_MS);
+        return;
+      }
+      clearTimeout(this._bgT);
+      this._bgT = 0;
+      if (!live) return this._dropLive();
       this._closePeer();
       this._connected = false;
-      // Camera's latest picture (Frigate latest.jpg via HA's proxy, ~0.2 s): covers the wait for the first frame
-      // and is the background at rest.
-      const pic = this._hass?.states[this._cfg.camera]?.attributes?.entity_picture;
-      if (pic) this._still.src = pic; else this._still.removeAttribute("src");
-      if (!live) return super._setVideo(false);
+      this._stillPic();
       this._live = true;
       this._video = null;
       this._card.classList.add("wait");
@@ -727,6 +750,20 @@ customElements.whenDefined(VIMAR).then(() => {
         this._render();
       };
       this._videoBox.replaceChildren(el);
+    }
+
+    _dropLive() {  // live over: the player goes, the camera's picture stays
+      this._closePeer();
+      this._connected = false;
+      this._stillPic();
+      super._setVideo(false);
+    }
+
+    // Camera's latest picture (Frigate latest.jpg via HA's proxy, ~0.2 s): covers the wait for the first frame
+    // and is the background at rest.
+    _stillPic() {
+      const pic = this._hass?.states[this._cfg.camera]?.attributes?.entity_picture;
+      if (pic) this._still.src = pic; else this._still.removeAttribute("src");
     }
 
     _ar() {
@@ -1055,9 +1092,9 @@ customElements.whenDefined(VIMAR).then(() => {
       if (this._root && this._hass) this._render();  // hidden: _setVideo closes the live; visible: reconnects it
     };
 
-    _goQuiet() {
+    _goQuiet() {  // the clip and the call (mic, WebSocket, AudioContext) end now; the live is _setVideo's
       this._stopClip();
-      this._closePeer();  // the player stops at once, + the call (_endMic): mic, WebSocket, AudioContext
+      this._endMic();
       this._session = null;
       this._audible = this._audioBlocked = false;
     }
@@ -1082,7 +1119,10 @@ customElements.whenDefined(VIMAR).then(() => {
         clearTimeout(this._ringT);
         clearInterval(this._lineT);
         this._lineT = this._lineAt = null;
+        clearTimeout(this._bgT);
+        this._bgT = 0;
         this._goQuiet();
+        this._closePeer();  // now, not after the base player's 5 s: iOS keeps a detached <video> playing
         this._live = undefined;  // recreated on return
       });
     }
