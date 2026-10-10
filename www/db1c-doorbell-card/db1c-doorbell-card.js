@@ -627,7 +627,9 @@ customElements.whenDefined(VIMAR).then(() => {
         this._pc = null;
         return;
       }
-      if (this._retry && this._retry < 4) return this._drop(why);
+      // Retry first (2, 4, 8 s) after a drop, or a first ICE failure (happens now and then at home); else HA's stream at once.
+      const r = this._retry || 0;
+      if (r < 4 && (r || why === "ICE failed")) return this._drop(why);
       console.warn("db1c-doorbell-card: WebRTC unavailable:", why);
       this._closePeer();
       this._retry = 0;
@@ -659,7 +661,7 @@ customElements.whenDefined(VIMAR).then(() => {
       v.play().catch(() => {});
     }
 
-    // Live dropped after connecting (HA/Frigate restart, network change): retried after 2, 4, 8 s;
+    // Live dropped (HA/Frigate restart, network change) or failed fast: retried after 2, 4, 8 s;
     // the fourth failed attempt switches to HA's stream (_fallback).
     _drop(why) {
       console.warn("db1c-doorbell-card: WebRTC dropped, retrying:", why);
