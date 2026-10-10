@@ -5,7 +5,7 @@ A Lovelace card for an EZVIZ DB1C (or another HCNetSDK doorbell):
 - live video and audio from Frigate's go2rtc, through the Frigate integration's WebRTC proxy;
 - two-way talk: the microphone goes to dahua_talk's RTSP backchannel source on port 8557, and the visitor's
   voice comes back from `/api/dahua_talk/listen/<speaker entity>` while you talk;
-- the camera's Frigate event history in a bottom sheet (drag it down to close), with clips;
+- the camera's Frigate event history in a bottom sheet (drag it down to close), with clips (Frigate's HLS where the browser plays it natively, as on iOS);
 - an optional Open button for a lock;
 - a camera-only mode for any other Frigate camera (see [Camera only](#camera-only)).
 

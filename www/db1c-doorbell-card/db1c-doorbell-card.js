@@ -42,6 +42,8 @@ const TAG = "db1c-doorbell-card";
 const STATUS = "sensor.__db1c_status";       // fake: they only exist in the hass the Vimar card sees
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
+const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
+const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
 const CONNECT_MS = 8000;  // WebRTC not connected within this (away from home: 8555 is LAN only) -> HA stream, video only
 const PROBE_MS = 60000;   // while on the HA stream, try WebRTC again this often (tab visible only)
 // Ear buffer: 0.4 s of 8 kHz PCM16 silence in front of _pcmSink, on every underrun. On the bench chunks
@@ -114,6 +116,13 @@ const EXTRA_CSS = `
   .drawer { display: none !important; }  /* the history is the .sheet */
   ha-card.clip :is(.row, .badge) { display: none !important; }
   #clipv { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  /* Clip loading/buffering: a spinner over the poster. */
+  ha-card.cload .media::after { content: ""; position: absolute; left: 50%; top: 50%; z-index: 3; width: 36px; height: 36px;
+    margin: -18px 0 0 -18px; box-sizing: border-box; border-radius: 50%; border: 3px solid rgba(255,255,255,.3);
+    border-top-color: #fff; animation: db1c-spin .9s linear infinite; pointer-events: none; }
+  @keyframes db1c-spin { to { transform: rotate(360deg); } }
+  /* HA's stream (fallback): black around the picture, not the theme's card colour. */
+  #video > * { --ha-card-background: #000; --card-background-color: #000; }
   #back { position: absolute; top: 12px; left: 12px; z-index: 4; height: 44px; padding: 0 14px 0 10px; gap: 6px;
     display: inline-flex; align-items: center; border-radius: 22px; font-size: 13px; color: #fff; background: rgba(0,0,0,.45);
     -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
@@ -374,6 +383,8 @@ customElements.whenDefined(VIMAR).then(() => {
       // Fit by default (the whole door); the choice is this card's, not the Vimar card's.
       try { this._cover = localStorage.getItem(FIT_KEY) === "cover"; } catch { this._cover = false; }
       this._applyFit();
+      this._shape(this._ar()[this._cfg.stream] || 0, 1, false);  // last live shape, before any frame (no jump, no white band)
+      this._still.addEventListener("load", () => !this._ar()[this._cfg.stream] && this._shape(this._still.naturalWidth, this._still.naturalHeight, false));
       this._fit.onclick = () => {
         this._cover = !this._cover;
         try { localStorage.setItem(FIT_KEY, this._cover ? "cover" : "contain"); } catch { /* this session only */ }
@@ -384,6 +395,9 @@ customElements.whenDefined(VIMAR).then(() => {
       this._root.append(document.createRange().createContextualFragment(SHEET));  // ShadowRoot has no insertAdjacentHTML
       const $ = (s) => this._root.querySelector(s);
       this._clipV = $("#clipv");
+      const load = (on) => () => this._card.classList.toggle("cload", on && !this._clipV.hidden);  // spinner while it buffers
+      this._clipV.onwaiting = load(true);
+      this._clipV.onplaying = this._clipV.oncanplay = this._clipV.onerror = this._clipV.onpause = load(false);
       this._back = $("#back");
       this._back.onclick = () => this._stopClip();
       this._sheet = $("dialog.sheet");
@@ -528,11 +542,27 @@ customElements.whenDefined(VIMAR).then(() => {
       const v = document.createElement("video");
       v.autoplay = v.playsInline = v.muted = true;
       v.onplaying = () => this._v === v && this._onVideo();  // not a background retry still detached
-      v.onresize = () => v.videoWidth && this._card.style.setProperty("--db1c-ar", v.videoWidth / v.videoHeight);  // Fit: the stream's shape
+      // Fit: the stream's shape. iOS may skip "resize" for a MediaStream: loadedmetadata and playing set it too.
+      v.onresize = v.onloadedmetadata = () => this._v === v && this._shape(v.videoWidth, v.videoHeight);
       return v;
     }
 
+    _ar() {
+      try { return JSON.parse(localStorage.getItem(AR_KEY)) || {}; } catch { return {}; }
+    }
+
+    // --db1c-ar = w/h, only when it really changes (a resize every frame would make the card jump); save = remember it
+    // for the next opening (the still's shape is only a first guess: Frigate's picture may come from the detect stream).
+    _shape(w, h, save = true) {
+      if (!w || !h || !this._card) return;
+      const ar = w / h, cur = parseFloat(this._card.style.getPropertyValue("--db1c-ar"));
+      if (Math.abs(ar - cur) < 0.01 * ar) return;
+      this._card.style.setProperty("--db1c-ar", ar);
+      if (save) try { localStorage.setItem(AR_KEY, JSON.stringify({ ...this._ar(), [this._cfg.stream]: ar })); } catch { /* this session only */ }
+    }
+
     _onVideo() {
+      this._shape(this._v?.videoWidth, this._v?.videoHeight);
       this._connected = true;
       this._retry = 0;
       this._card.classList.remove("wait");
@@ -542,6 +572,7 @@ customElements.whenDefined(VIMAR).then(() => {
 
     // Live: video + visitor voice, receive only (no talk channel at rest, see _micLeg).
     _connect(v) {
+      if (!window.RTCPeerConnection) return this._fallback("no WebRTC in this browser");  // e.g. iOS Lockdown Mode
       const pc = (this._pc = new RTCPeerConnection());
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.addTransceiver("audio", { direction: "recvonly" });
@@ -612,7 +643,7 @@ customElements.whenDefined(VIMAR).then(() => {
 
     // On HA's stream: try WebRTC again in the background; HA's stream stays until it connects.
     _probe = () => {
-      if (this._fellBack && !this._pc && !document.hidden) this._connect(this._newVideo());
+      if (this._fellBack && !this._pc && !document.hidden && window.RTCPeerConnection) this._connect(this._newVideo());
     };
 
     // A background retry got through: from HA's stream back to WebRTC (onplaying -> _onVideo does the rest).
@@ -841,20 +872,52 @@ customElements.whenDefined(VIMAR).then(() => {
     }
 
     // The clip in the video box (live stays connected underneath, to go back at once); no clip, the snapshot.
-    _playClip(e) {
+    // iOS can't play clip.mp4 (the proxy ignores Range requests): browsers with native HLS (iOS, Safari, recent
+    // Chrome) get Frigate's HLS of the event, signed like the Frigate card does (a <video> can't send the token;
+    // the segments inherit the playlist's signature). Signing failed: only the poster.
+    async _playClip(e) {
       this._setDrawer(false);
-      const v = this._clipV, base = this._evBase(e);
+      const v = this._clipV, base = this._evBase(e), n = ++this._clipN;
       v.poster = e.has_snapshot ? `${base}snapshot.jpg` : "";
-      if (e.has_clip) v.src = `${base}clip.mp4`; else v.removeAttribute("src");
+      v.pause();
+      v.removeAttribute("src");
+      v.load();  // the previous clip stops now, not when the new one arrives
+      v.muted = false;
       v.hidden = this._back.hidden = false;
       this._card.classList.add("clip");
-      if (e.has_clip) v.play().catch(() => {});  // iOS may want a tap on the controls
+      this._card.classList.toggle("cload", !!e.has_clip);
       this.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (!e.has_clip) return;
+      let src = `${base}clip.mp4`;
+      if (v.canPlayType("application/vnd.apple.mpegurl")) {
+        try {
+          src = (await this._hass.callWS({ type: "auth/sign_path", expires: CLIP_SIGN_S,
+            path: `/api/frigate/${this._cfg.frigate_instance}/vod/event/${encodeURIComponent(e.id)}/index.m3u8` })).path;
+        } catch (err) {
+          console.warn("db1c-doorbell-card: clip signing failed:", err.message || err);
+          if (n === this._clipN) this._card.classList.remove("cload");
+          return;
+        }
+        if (n !== this._clipN) return;  // back to live, or another clip, meanwhile
+      }
+      v.src = src;
+      // Unmuted play() after an await is no longer the user's tap: iOS refuses it, so start muted (controls unmute).
+      const stuck = () => n === this._clipN && this._card.classList.remove("cload");  // refused: no canplay will come
+      v.play().catch((err) => {
+        if (n !== this._clipN) return;
+        if (err.name !== "NotAllowedError") return stuck();
+        v.muted = true;
+        v.play().catch(stuck);
+      });
     }
+
+    _clipN = 0;  // the clip being opened: a later tap or Back drops an earlier one still signing
 
     _stopClip() {
       const v = this._clipV;
       if (!v) return;
+      this._clipN++;
+      this._card.classList.remove("cload");
       v.pause();
       v.removeAttribute("src");
       v.removeAttribute("poster");
