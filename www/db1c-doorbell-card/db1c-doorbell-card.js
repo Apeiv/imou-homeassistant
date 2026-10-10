@@ -16,7 +16,9 @@
 //     paged by `history`), a tap plays the clip in the video box; Frigate's notifications proxy needs no
 //     auth (event id), so no expiring signatures;
 //   startup: the camera's latest picture (entity_picture, ~0.2 s) until the first live frame arrives;
-//   Open: a configured lock/button (none = no Open button).
+//   Open: a configured lock/button (none = no Open button);
+//   camera only: without `ring` the card is a plain Frigate camera (live, Fit/Fill, history; Listen only if
+//     the stream has audio), no talk, ring or Open.
 // The states (idle/ringing/calling/in_call/offline) do not exist in HA: the card computes them and hands
 // them to the Vimar card as if they were a sensor (wrapped hass, see _wrap).
 //
@@ -26,8 +28,8 @@
 //   camera: camera.front_door                  (required: offline state, still picture, video fallback)
 //   stream: front_door                         (required: go2rtc stream inside Frigate)
 //   frigate_camera: front_door                 (required: Frigate camera name for the event history)
-//   ring: input_boolean.doorbell_ring          (required)
-//   speaker: media_player.front_door_speaker   (required: dahua_talk entity, visitor voice while talking)
+//   ring: input_boolean.doorbell_ring          (required for the doorbell; without it: camera only)
+//   speaker: media_player.front_door_speaker   (required with `ring`: dahua_talk entity, visitor voice while talking)
 //   ring_time: input_datetime.doorbell_last_ring  (optional)
 //   lock: lock.front_door                      (optional: Open = lock.open, with the latch; confirm_open: double tap)
 //   layout: overlay                            (+ every Vimar card key: listen_on_ring, confirm_open...)
@@ -46,7 +48,7 @@ const PROBE_MS = 60000;   // while on the HA stream, try WebRTC again this often
 // arrive in 64 ms pairs with gaps up to 200 ms even on LAN; the player's 120 ms lead is not enough.
 const EAR_RATE = 8000;
 const EAR_PRE_BYTES = 0.4 * EAR_RATE * 2;
-const REQUIRED = ["camera", "stream", "frigate_camera", "ring", "speaker"];
+const REQUIRED = ["camera", "stream", "frigate_camera"];  // + speaker with ring (the doorbell)
 const DEFAULTS = {
   name: "Doorbell",
   frigate_instance: "frigate",        // client_id of the Frigate integration
@@ -72,7 +74,7 @@ const I18N = {
     jammed: "Jammed", unavailable: "Unavailable", open_door: "Open door", confirm: "Confirm",
     open_aria: "Open the door", open_aria_twice: "Open the door, tap twice", mute: "Mute audio", listen: "Listen",
     talk_ring: "Talk to the visitor", ignore: "Ignore the ring", end: "End conversation",
-    back: "Live", back_aria: "Back to live video", events: "Events", events_aria: "Doorbell events", close: "Close",
+    back: "Live", back_aria: "Back to live video", events: "Events", events_aria: "Doorbell events", cam_events_aria: "Camera events", close: "Close",
     today: "today", yesterday: "yesterday", ongoing: "ongoing", play: "play",
     no_events: "No events recorded", history_err: "History unavailable", mic_err: "Microphone not connected",
     video_only: "Video only: voice and microphone work on the home network.",
@@ -85,7 +87,7 @@ const I18N = {
     jammed: "Bloccata", unavailable: "Non disponibile", open_door: "Apri porta", confirm: "Conferma",
     open_aria: "Apri la porta", open_aria_twice: "Apri la porta, tocca due volte", mute: "Silenzia l'audio", listen: "Ascolta l'audio",
     talk_ring: "Parla con il visitatore", ignore: "Ignora lo squillo", end: "Chiudi conversazione",
-    back: "Dal vivo", back_aria: "Torna al video dal vivo", events: "Eventi", events_aria: "Eventi della porta", close: "Chiudi",
+    back: "Dal vivo", back_aria: "Torna al video dal vivo", events: "Eventi", events_aria: "Eventi della porta", cam_events_aria: "Eventi della telecamera", close: "Chiudi",
     today: "oggi", yesterday: "ieri", ongoing: "in corso", play: "riproduci",
     no_events: "Nessun evento registrato", history_err: "Storico non disponibile", mic_err: "Microfono non collegato",
     video_only: "Solo video: voce e microfono funzionano in casa.",
@@ -154,6 +156,7 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live .badge::before { background: var(--db1c-accent, var(--dot, var(--st))); }
   :host([layout="overlay"]) .live[data-state="ringing"] .badge { background: var(--db1c-warning, var(--vi-warn)); color: var(--db1c-on-warning, #fff); }
   :host([layout="overlay"]) .live[data-state="ringing"] .badge::before { background: currentColor; animation: blink 1s ease-in-out infinite; }
+  :host([camera-only]) :is(#talk, #hangup, #view) { display: none !important; }
   :host([layout="overlay"]) .live #log { right: 64px; }
   :host([layout="overlay"]) .live #fit { right: 12px; }
   /* Light glass (like the status pill, more transparent) in light and dark theme: dark text, fixed colours. */
@@ -215,9 +218,13 @@ customElements.whenDefined(VIMAR).then(() => {
 
     setConfig(config) {
       if (INCOMPATIBLE) throw new Error(INCOMPATIBLE);  // red error card in Lovelace
-      const missing = REQUIRED.filter((k) => !config?.[k]);
+      const cam = !config?.ring;
+      const missing = (cam ? REQUIRED : [...REQUIRED, "speaker"]).filter((k) => !config?.[k]);
       if (missing.length) throw new Error(`db1c-doorbell-card: missing required option(s): ${missing.join(", ")}`);
-      super.setConfig({ ...DEFAULTS, ...config, status: STATUS, last_ring: LAST });
+      // Camera only: always live in the card (no call to start it, nothing to pop up), no #doorbell anchor.
+      super.setConfig({ ...DEFAULTS, ...(cam && { name: "Camera", anchor: null }), ...config,
+        ...(cam && { always_live: true, layout: "overlay" }), status: STATUS, last_ring: LAST });
+      this.toggleAttribute("camera-only", cam);  // CSS: no talk, hang up (Open: no lock, see _list)
       // colors: { accent: "var(--my-accent)" } -> --db1c-accent on the host (inherited by the shadow DOM)
       for (const k of COLORS) {
         const v = config.colors?.[k];
@@ -225,6 +232,8 @@ customElements.whenDefined(VIMAR).then(() => {
         else this.style.setProperty(`--db1c-${k}`, String(v));
       }
     }
+
+    get _camOnly() { return !this._cfg.ring; }
 
     set hass(h) {
       this._trackRing(h);
@@ -245,11 +254,17 @@ customElements.whenDefined(VIMAR).then(() => {
       return Object.create(h, { states: { value: states }, callService: { value: callService } });
     }
 
+    // No lock and no shortcuts (camera only, doorbell without Open): nothing, not the Vimar card's [null].
+    _list() {
+      return this._cfg.lock || this._cfg.shortcuts ? super._list() : [];
+    }
+
     _ent(key) {
       return key === "camera" ? this._cfg.camera : super._ent(key);  // never the Vimar camera found in the registry
     }
 
     _trackRing(h) {
+      if (this._camOnly) return;  // a ring_time alone does not ring a camera
       const r = h.states[this._cfg.ring];
       this._ringOn = r?.state === "on";
       const t = h.states[this._cfg.ring_time]?.attributes?.timestamp;  // epoch s: Safari can't Date.parse("YYYY-MM-DD hh:mm")
@@ -316,7 +331,7 @@ customElements.whenDefined(VIMAR).then(() => {
       // Listen button (next to the microphone): crossed = muted, plain = audible. One state, _audible
       // (true = chosen by the user or talking, "auto" = listen_on_ring), also valid with the microphone open.
       const hearing = !!this._audible;
-      this._mute.hidden = !this._v;
+      this._mute.hidden = !this._v || (this._camOnly && !this._v.srcObject?.getAudioTracks().length);  // camera: only a stream with audio
       this._icon(this._mute, hearing ? "mdi:volume-high" : "mdi:volume-off");
       this._mute.setAttribute("aria-pressed", hearing);
       const T = this._t;
@@ -372,6 +387,7 @@ customElements.whenDefined(VIMAR).then(() => {
       this._back = $("#back");
       this._back.onclick = () => this._stopClip();
       this._sheet = $("dialog.sheet");
+      if (this._camOnly) for (const el of [this._sheet, this._log]) el.dataset.ta = "cam_events_aria";
       this._evl = $(".evl");
       this._sent = $(".sent");
       this._evx = $(".evx");
@@ -586,7 +602,7 @@ customElements.whenDefined(VIMAR).then(() => {
       this._retry = 0;
       this._fellBack = true;
       this._card.classList.remove("wait");
-      this._err.textContent = this._t.video_only;
+      if (!this._camOnly) this._err.textContent = this._t.video_only;  // a camera has no voice or microphone
       this._setPicture(true);
       if (this._session === "calling") this._session = "in_call";
       this._probeT = setInterval(this._probe, PROBE_MS);
