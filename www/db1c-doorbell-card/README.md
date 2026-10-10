@@ -2,28 +2,29 @@
 
 A Lovelace card for an EZVIZ DB1C (or another HCNetSDK doorbell):
 
-- live video and audio from Frigate's go2rtc, through the Frigate integration's WebRTC proxy;
-- two-way talk: the microphone goes to dahua_talk's RTSP backchannel source on port 8557, and the visitor's
-  voice comes back from `/api/dahua_talk/listen/<speaker entity>` while you talk;
+- live video and audio from Frigate's go2rtc with go2rtc's own player (WebRTC, MSE or MJPEG, whichever
+  connects), through the Frigate integration's proxy;
+- a call (hear and talk at once) on one Home Assistant WebSocket, `/api/dahua_talk/call_ws/<speaker entity>`,
+  at home and away from home alike;
 - the camera's Frigate event history in a bottom sheet (drag it down to close), with clips (Frigate's HLS where the browser plays it natively, as on iOS);
 - an optional Open button for a lock;
 - a camera-only mode for any other Frigate camera (see [Camera only](#camera-only)).
 
-It extends `vimar-intercom-card`, so it has the same layout, buttons and states. Away from home, when WebRTC
-can't connect, it falls back to Home Assistant's camera stream (video only) and keeps retrying WebRTC every minute.
+It extends `vimar-intercom-card`, so it has the same layout, buttons and states. The camera's latest picture
+shows until the first live frame arrives.
 
 ## Requirements
 
 - The Vimar intercom card loaded as a resource (`vimar-intercom-card`). This card is a subclass of it, and it
   shows an error card if the loaded version lacks the hooks it needs.
 - The Frigate integration, with the doorbell as a Frigate camera and its go2rtc stream.
-- dahua_talk with an HCNetSDK entry for the doorbell. Add its backchannel source
-  (`rtsp://<home assistant>:8557/...#backchannel=1`) to the go2rtc stream in Frigate.
+- dahua_talk with an HCNetSDK entry for the doorbell and its `call_ws` view. Without it the card works and
+  the call says "Talk not available".
 
 ## Install
 
-1. Copy `db1c-doorbell-card.js` to `/config/www/`.
-2. Add the resource `/local/db1c-doorbell-card.js` with type `module` (Settings > Dashboards > Resources).
+1. Copy the `db1c-doorbell-card` folder (the card and its `go2rtc/` folder) to `/config/www/`.
+2. Add the resource `/local/db1c-doorbell-card/db1c-doorbell-card.js` with type `module` (Settings > Dashboards > Resources).
 3. Add the card in YAML (there is no visual editor).
 
 ```yaml
@@ -42,11 +43,11 @@ speaker: media_player.front_door_speaker
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `camera` | yes | | Camera entity: offline state, still picture, video fallback. Example `camera.front_door` |
+| `camera` | yes | | Camera entity: offline state, still picture. Example `camera.front_door` |
 | `stream` | yes | | go2rtc stream name inside Frigate. Example `front_door` |
 | `frigate_camera` | yes | | Frigate camera name for the event history. Example `front_door` |
 | `ring` | no | | Without it the card is [camera only](#camera-only). Entity that is `on` while ringing (input_boolean, binary_sensor) or an `event.*` entity. Example `input_boolean.doorbell_ring` |
-| `speaker` | no | | Required with `ring`. dahua_talk media_player of the doorbell (visitor voice while talking). Example `media_player.front_door_speaker` |
+| `speaker` | no | | Required with `ring`. dahua_talk media_player of the doorbell (the call). Example `media_player.front_door_speaker` |
 | `ring_time` | no | none | input_datetime with the last ring time: survives page reloads. Example `input_datetime.doorbell_last_ring` |
 | `lock` | no | none | Lock opened with `lock.open`. Without `lock` (and without `shortcuts`) there is no Open button. Example `lock.front_door` |
 | `name` | no | `Doorbell` (`Camera` without `ring`) | Card name |
@@ -59,6 +60,7 @@ speaker: media_player.front_door_speaker
 | `always_live` | no | `true` | Live video at rest too; `false` = only on ring or call |
 | `anchor` | no | `doorbell` (none without `ring`) | URL hash (`#doorbell`) that scrolls the card into view |
 | `listen_on_ring` | no | `false` | Hear the visitor as soon as it rings (Vimar card option) |
+| `ear_buffer` | no | `0.12` on a LAN address, else `0.5` | Seconds of visitor voice kept in hand during a call: more = fewer gaps, more delay |
 | `language` | no | HA language | `en` or `it`; other languages fall back to English |
 | `colors` | no | theme | See [Colors](#colors) |
 
@@ -67,8 +69,8 @@ Other Vimar card options (such as `shortcuts`) pass through.
 ## Camera only
 
 Leave out `ring` (and `speaker`) and the card shows any Frigate camera with the same look: the latest picture
-at once, then live WebRTC, Fit/Fill, the event history with clips. There is no talk, ring or Open button; the
-Listen button appears only if the go2rtc stream sends audio WebRTC can play (Opus/PCM, not AAC). It is always
+at once, then live video, Fit/Fill, the event history with clips. There is no talk, ring or Open button; the
+Listen button appears only if the stream that plays has audio. It is always
 live in the card: `always_live` and `layout` are ignored.
 
 ```yaml
@@ -108,9 +110,30 @@ colors:
   ink: var(--primary-text-color)
 ```
 
+## How it works
+
+- **Video:** `go2rtc/video-rtc.js` from go2rtc, unmodified, in modes `webrtc,mse,mjpeg` on
+  `/api/frigate/<frigate_instance>/mse/api/ws?src=<stream>`. A 10-line subclass (`db1c-video-rtc`) signs the
+  URL again (`auth/sign_path`, 30 s) on every connection and reconnection. The card never calls `play()` or sets
+  `src`/`srcObject` on the player's video: it reads its events and sets `muted`.
+- **Call:** Answer opens the microphone (echo cancellation, noise suppression) and one signed WebSocket to
+  `/api/dahua_talk/call_ws/<speaker>`. The server sends `{"type":"ready"}`; busy = close code 4409, the 180 s cap =
+  close code 4408. Binary `0x01` + PCM16 LE mono 8 kHz is the visitor's voice, the card sends `0x02` + the
+  same for the microphone, only after `ready`. During the call the video is muted, Talk mutes the microphone and
+  Hang up ends the call. On a phone the call ends when the app goes to the background.
+
+## go2rtc player file
+
+`go2rtc/video-rtc.js` is go2rtc's web player, unmodified, from go2rtc **1.9.14** (the go2rtc inside Frigate 0.18),
+sha256 `d48ce627baf7c341a92c0f5844a3c546431f9db873ff21489671aba2ecfe64fb`, MIT licence (`go2rtc/LICENSE`).
+Take it from the same version as Frigate's go2rtc when Frigate is updated.
+
+The card imports `./go2rtc/video-rtc.js` relative to itself: serve it from its folder
+(`/local/db1c-doorbell-card/db1c-doorbell-card.js` with `go2rtc/` next to it), not as a lone file in `/config/www/`.
+
 ## Notes
 
-- dahua_talk closes the talk channel after 3 minutes of each Talk session.
+- dahua_talk closes the call after 3 minutes.
 - On a PC use headphones: Chrome doesn't echo-cancel audio played through WebAudio, so the visitor may hear
   themselves.
-- iOS starts the video muted: tap the speaker button to hear it.
+- The video starts muted: tap the speaker button to hear it.

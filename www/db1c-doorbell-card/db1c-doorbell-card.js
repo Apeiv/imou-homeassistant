@@ -1,14 +1,13 @@
 // DB1C doorbell: the Vimar intercom card (same DOM, same CSS, same states and buttons) with a different
 // "backend": no SIP and no vimar_intercom WebSocket, but
-//   visitor video + voice: a receive-only RTCPeerConnection to Frigate's go2rtc, through the Frigate
-//     integration proxy (/api/frigate/<instance>/webrtc/api/ws?src=<stream>, signed);
-//   microphone: ONLY while talking, a second send-only PeerConnection (like the Frigate UI) -> go2rtc ->
-//     dahua_talk's #backchannel=1 source (rtsp://...:8557/<entry>/<key>, added to the stream in Frigate)
-//     -> the DB1C speaker. At rest nobody holds the talk channel;
-//   visitor voice WHILE talking (both directions at once): with the talk channel open the DB1C sends its
-//     microphone on the same channel (HCNetSDK), dahua_talk decodes it and serves it on
-//     /api/dahua_talk/listen/<speaker> (PCM 8 kHz); the card plays it on an AudioContext (the Vimar card's
-//     player) and, as soon as it flows, mutes the <video>'s RTSP audio so it is not heard twice;
+//   visitor video + voice at rest: go2rtc's own player (go2rtc/video-rtc.js, unmodified, the go2rtc version
+//     inside Frigate) on the Frigate integration proxy (/api/frigate/<instance>/mse/api/ws?src=<stream>),
+//     modes webrtc,mse,mjpeg (WebRTC at home, MSE through the tunnel, MJPEG as a last resort), URL signed
+//     again on every (re)connection;
+//   call (hear + talk): ONE signed WebSocket to dahua_talk, /api/dahua_talk/call_ws/<speaker>: the server says
+//     {"type":"ready"} (busy = close 4409, 3-minute cap = close 4408), binary 0x01 + PCM16 8 kHz = visitor voice, the card sends
+//     0x02 + PCM16 8 kHz = microphone (the Vimar card's protocol and capture, copied). While it is open the
+//     <video> is muted;
 //   ring: an "on" entity (input_boolean/binary_sensor, or event.*) + an optional input_datetime with the
 //     time of the last ring (ring_time: survives a page reload and gives "rang HH:MM");
 //   video: ALWAYS live, also at rest (always_live, default true; false = like the Vimar card);
@@ -25,32 +24,30 @@
 // Needs the Vimar intercom card loaded (the vimar_intercom integration does it): this card extends it.
 //
 //   type: custom:db1c-doorbell-card
-//   camera: camera.front_door                  (required: offline state, still picture, video fallback)
+//   camera: camera.front_door                  (required: offline state, still picture)
 //   stream: front_door                         (required: go2rtc stream inside Frigate)
 //   frigate_camera: front_door                 (required: Frigate camera name for the event history)
 //   ring: input_boolean.doorbell_ring          (required for the doorbell; without it: camera only)
-//   speaker: media_player.front_door_speaker   (required with `ring`: dahua_talk entity, visitor voice while talking)
+//   speaker: media_player.front_door_speaker   (required with `ring`: dahua_talk entity of the call)
 //   ring_time: input_datetime.doorbell_last_ring  (optional)
 //   lock: lock.front_door                      (optional: Open = lock.open, with the latch; confirm_open: double tap)
 //   layout: overlay                            (+ every Vimar card key: listen_on_ring, confirm_open...)
 //   colors: { accent: ..., button: ... }       (optional: --db1c-* colours of the pill and the buttons, see README)
 //   language: it                               (optional: default HA's language, then English)
-//   frigate_instance / history_labels / history / ring_timeout / always_live: see DEFAULTS
+//   frigate_instance / history_labels / history / ring_timeout / always_live / ear_buffer: see DEFAULTS
+
+import { VideoRTC } from "./go2rtc/video-rtc.js";
 
 const VIMAR = "vimar-intercom-card";
 const TAG = "db1c-doorbell-card";
+const VIDEO = "db1c-video-rtc";  // the player below
 const STATUS = "sensor.__db1c_status";       // fake: they only exist in the hass the Vimar card sees
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
 const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
 const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
-const CONNECT_MS = 8000;  // WebRTC not connected within this (away from home: 8555 is LAN only) -> HA stream, video only
-const PROBE_MS = 60000;
-const HLS_RETRY_MS = 5000;  // HA's HLS (fallback) stopped: ask for a new one after this   // while on the HA stream, try WebRTC again this often (tab visible only)
-// Ear buffer: 0.4 s of 8 kHz PCM16 silence in front of _pcmSink, on every underrun. On the bench chunks
-// arrive in 64 ms pairs with gaps up to 200 ms even on LAN; the player's 120 ms lead is not enough.
-const EAR_RATE = 8000;
-const EAR_PRE_BYTES = 0.4 * EAR_RATE * 2;
+const RATE = 8000;  // call audio, both ways
+const LAN = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/.test(location.hostname);
 const REQUIRED = ["camera", "stream", "frigate_camera"];  // + speaker with ring (the doorbell)
 const DEFAULTS = {
   name: "Doorbell",
@@ -64,6 +61,7 @@ const DEFAULTS = {
   layout: "overlay",                  // the video sits in the card: "popup" shows it only with the popup open
   always_live: true,                  // live video also at rest (false = only on ring/call)
   anchor: "doorbell",                 // URL hash that scrolls to the card; not the Vimar card's one
+  ear_buffer: null,                   // s of visitor voice kept in hand; null = 0.12 on a LAN address, else 0.5
 };
 // History sheet: close animation (ms), drag slop and close distance (px), flick window (ms) and speed (px/ms).
 const SHEET_MS = 220, DRAG_SLOP = 8, DRAG_CLOSE = 80, FLICK_MS = 80, FLICK_SPEED = 0.5;
@@ -79,9 +77,9 @@ const I18N = {
     talk_ring: "Talk to the visitor", ignore: "Ignore the ring", end: "End conversation",
     back: "Live", back_aria: "Back to live video", events: "Events", events_aria: "Doorbell events", cam_events_aria: "Camera events", close: "Close",
     today: "today", yesterday: "yesterday", ongoing: "ongoing", play: "play",
-    no_events: "No events recorded", history_err: "History unavailable", mic_err: "Microphone not connected",
-    video_only: "Video only: voice and microphone work on the home network.",
-    away: "video only away from home", not_live: "live stream not connected",
+    no_events: "No events recorded", history_err: "History unavailable",
+    answer: "Answer", mic_off: "Mute the microphone", mic_on: "Unmute the microphone", talk_na: "Talk not available",
+    busy: "Busy: another phone is talking", call_cap: "Call closed after 3 minutes", call_end: "Call dropped",
     l_person: "Person", l_car: "Car", l_dog: "Dog", l_cat: "Cat", l_doorbell: "Doorbell",  // Frigate labels
   },
   it: {
@@ -92,9 +90,9 @@ const I18N = {
     talk_ring: "Parla con il visitatore", ignore: "Ignora lo squillo", end: "Chiudi conversazione",
     back: "Dal vivo", back_aria: "Torna al video dal vivo", events: "Eventi", events_aria: "Eventi della porta", cam_events_aria: "Eventi della telecamera", close: "Chiudi",
     today: "oggi", yesterday: "ieri", ongoing: "in corso", play: "riproduci",
-    no_events: "Nessun evento registrato", history_err: "Storico non disponibile", mic_err: "Microfono non collegato",
-    video_only: "Solo video: voce e microfono funzionano in casa.",
-    away: "solo video fuori casa", not_live: "diretta non collegata",
+    no_events: "Nessun evento registrato", history_err: "Storico non disponibile",
+    answer: "Rispondi", mic_off: "Silenzia il microfono", mic_on: "Riattiva il microfono", talk_na: "Parla non disponibile",
+    busy: "Occupato: altro telefono in linea", call_cap: "Chiamata chiusa dopo 3 minuti", call_end: "Chiamata interrotta",
     l_person: "Persona", l_car: "Auto", l_dog: "Cane", l_cat: "Gatto", l_doorbell: "Campanello",  // Frigate labels
   },
 };
@@ -105,8 +103,8 @@ const SHEET = `<dialog class="sheet" data-ta="events_aria"><div class="grab"><di
   <header><span data-t="events"></span><button class="x" data-t="close"></button></header></div>
   <div class="evl"><div class="sent"></div></div><p class="evx"></p></dialog>`;
 const EXTRA_CSS = `
-  #video > video { width: 100%; height: 100%; object-fit: cover; background: #000; }
-  ha-card[data-fit="contain"] #video > video { object-fit: contain; }
+  #video video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+  ha-card[data-fit="contain"] #video video { object-fit: contain; }
   /* Startup: the camera's latest picture instead of "waiting for video" until the first frame. */
   ha-card.live.wait .still[src] { display: block; }
   ha-card.live.wait .still[src] + .ph { display: none; }
@@ -122,11 +120,6 @@ const EXTRA_CSS = `
     margin: -18px 0 0 -18px; box-sizing: border-box; border-radius: 50%; border: 3px solid rgba(255,255,255,.3);
     border-top-color: #fff; animation: db1c-spin .9s linear infinite; pointer-events: none; }
   @keyframes db1c-spin { to { transform: rotate(360deg); } }
-  /* HA's stream (fallback) over the latest picture: the still shows until the stream plays, not a blank box. */
-  ha-card.fb #video > * { --ha-card-background: transparent; --card-background-color: transparent; }
-  ha-card.live.fb .still[src] { display: block; }
-  ha-card.live.fb #video { z-index: 1; }
-  ha-card.live.fb #video > video { background: none; }
   #back { position: absolute; top: 12px; left: 12px; z-index: 4; height: 44px; padding: 0 14px 0 10px; gap: 6px;
     display: inline-flex; align-items: center; border-radius: 22px; font-size: 13px; color: #fff; background: rgba(0,0,0,.45);
     -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
@@ -211,7 +204,6 @@ const PAGE_EVENTS = ["visibilitychange", "pagehide", "pageshow"];  // listened o
 // the call going: switching tabs must not hang up.
 const TOUCH = matchMedia("(pointer: coarse)").matches;
 const pageGone = (e) => e?.type === "pagehide" || (TOUCH && document.visibilityState === "hidden");
-const hangUp = (pc) => { pc?.close(); pc?.sock?.close(); };  // PeerConnection + its go2rtc WebSocket
 const dur = (e, T) => {
   if (!e.end_time) return T.ongoing;
   const s = Math.max(1, Math.round(e.end_time - e.start_time));
@@ -221,9 +213,61 @@ const dur = (e, T) => {
 customElements.whenDefined(VIMAR).then(() => {
   const Vimar = customElements.get(VIMAR);
   // This card leans on the Vimar card's internals: a missing hook means an incompatible version.
-  const INCOMPATIBLE = ["_openAudio", "_pcmSink"].some((m) => typeof Vimar.prototype[m] !== "function")
-    && "db1c-doorbell-card: the loaded Vimar intercom card is too old/new: missing _openAudio/_pcmSink";
+  const INCOMPATIBLE = ["_startTalk", "_openAudio"].some((m) => typeof Vimar.prototype[m] !== "function")
+    && "db1c-doorbell-card: the loaded Vimar intercom card is too old/new: missing _startTalk/_openAudio";
   if (INCOMPATIBLE) console.error(INCOMPATIBLE);
+
+  // go2rtc's player with HA's signed URL: a signature lasts 30 s, so every (re)connection signs again
+  // (`sign` resolves to the ws(s):// URL). No controls, muted until _applyAudio says otherwise; page visibility is
+  // the card's (_onPageState). Closed, the "empty src" error of its own ondisconnect is not logged (capture: before
+  // the player's listener). play() = the player's, plus `onblocked` when an unmuted play is refused (iOS without a
+  // tap). MJPEG has no video events: `onframe` on the first picture.
+  customElements.get(VIDEO) || customElements.define(VIDEO, class extends VideoRTC {
+    oninit() {
+      this.visibilityCheck = false;
+      super.oninit();
+      this.video.controls = false;
+      this.video.muted = true;
+      this.addEventListener("error", (e) => !this.ws && !this.pc && e.stopPropagation(), true);
+    }
+
+    onconnect() {
+      if (!this.isConnected || !this.sign || this.ws || this.pc || this.signing) return false;
+      this.signing = this.sign()
+        .then((url) => {
+          this.wsURL = url;
+          if (!document.hidden) super.onconnect();
+        }, (e) => {
+          console.warn("db1c-doorbell-card: signing failed:", e.message || e);
+          this.reconnectTID = setTimeout(() => this.onconnect(), this.RECONNECT_TIMEOUT);
+        })
+        .finally(() => { this.signing = null; });
+      return true;
+    }
+
+    ondisconnect() {
+      if (this.video) super.ondisconnect();  // never connected: nothing to close
+    }
+
+    play() {
+      this.video.play().catch((e) => {
+        if (e?.name !== "NotAllowedError" || this.video.muted) return;  // AbortError at hangup: not a block
+        this.video.muted = true;
+        this.onblocked?.();
+        this.video.play().catch(() => {});
+      });
+    }
+
+    onmjpeg() {
+      super.onmjpeg();
+      const show = this.ondata;
+      this.ondata = (d) => {
+        show(d);
+        this.onframe?.();
+        this.onframe = null;
+      };
+    }
+  });
 
   class Db1cDoorbellCard extends Vimar {
     static getConfigElement() { return undefined; }  // the editor is the Vimar one: YAML only here
@@ -297,7 +341,7 @@ customElements.whenDefined(VIMAR).then(() => {
       return r && r !== this._declined && (this._ringOn || fresh) ? "ringing" : "idle";
     }
 
-    // The vimar_intercom services become local states: the DB1C has no "call", WebRTC is either there or not.
+    // The vimar_intercom services become local states: the DB1C has no "call" to place.
     async _call(service) {
       // Hidden: no new session (a microphone permission that resolves after the app went to the background).
       if (this._hidden && (service === "call" || service === "answer")) return;
@@ -339,18 +383,20 @@ customElements.whenDefined(VIMAR).then(() => {
       this._open.hidden = !this._list().length;  // no lock/shortcut configured: no Open button
       // Icon-only rounds (the label stays in the aria-label). On ring Talk stays the microphone, Decline = Ignore.
       const ring = this._state === "ringing";
-      this._icon(this._talk, this._ws ? "mdi:microphone" : "mdi:microphone-off");
+      const call = this._ws;  // Talk = Answer; during the call it mutes the microphone
+      this._icon(this._talk, !call ? "mdi:phone" : call.micOff ? "mdi:microphone-off" : "mdi:microphone");
       this._lockState();
       // Listen button (next to the microphone): crossed = muted, plain = audible. One state, _audible
       // (true = chosen by the user or talking, "auto" = listen_on_ring), also valid with the microphone open.
       const hearing = !!this._audible;
-      this._mute.hidden = !this._v || (this._camOnly && !this._v.srcObject?.getAudioTracks().length);  // camera: only a stream with audio
+      const audio = this._v?.srcObject?.getAudioTracks?.().length || this._rtc?.mseCodecs?.match(/mp4a|opus|flac/);
+      this._mute.hidden = !!call || !this._v || (this._camOnly && !audio);  // call: the voice is on; camera: only a stream with audio
       this._icon(this._mute, hearing ? "mdi:volume-high" : "mdi:volume-off");
       this._mute.setAttribute("aria-pressed", hearing);
       const T = this._t;
       this._mute.setAttribute("aria-label", hearing ? T.mute : T.listen);
       this._applyAudio();
-      this._talk.setAttribute("aria-label", ring ? T.talk_ring : this._talk.querySelector(".lbl").textContent);
+      this._talk.setAttribute("aria-label", !call ? (ring ? T.talk_ring : T.answer) : call.micOff ? T.mic_on : T.mic_off);
       this._icon(this._hangup, ring ? "mdi:bell-off" : "mdi:phone-hangup");
       this._hangup.setAttribute("aria-label", ring ? T.ignore : T.end);
     }
@@ -376,6 +422,14 @@ customElements.whenDefined(VIMAR).then(() => {
 
     _build() {
       super._build();
+      const talk = this._talk.onclick;  // the Vimar one starts the call; in the call: microphone mute, not hang up
+      this._talk.onclick = () => {
+        const c = this._ws;
+        if (!c) return talk();
+        c.micOff = !c.micOff;
+        c.mic.getAudioTracks().forEach((t) => { t.enabled = !c.micOff; });  // silence keeps flowing: the channel stays
+        this._render();
+      };
       this._talk.after(this._mute);  // in the bottom row, right after the microphone
       this._mute.onclick = () => {  // real tap: the unmuted play() in _applyAudio passes on iOS too
         this._audible = !this._audible;
@@ -393,7 +447,6 @@ customElements.whenDefined(VIMAR).then(() => {
         this._cover = !this._cover;
         try { localStorage.setItem(FIT_KEY, this._cover ? "cover" : "contain"); } catch { /* this session only */ }
         this._applyFit();
-        if (this._fellBack && !this._hls) this._setPicture(true);  // HA's card reads fit_mode only when created
       };
       this._root.querySelector(".media").insertAdjacentHTML("beforeend", CLIP);
       this._root.append(document.createRange().createContextualFragment(SHEET));  // ShadowRoot has no insertAdjacentHTML
@@ -503,7 +556,8 @@ customElements.whenDefined(VIMAR).then(() => {
       sheet.addEventListener("click", (e) => this._dragged && e.stopImmediatePropagation(), true);
     }
 
-    // Pill without the name: "rang 08:28" / "ringing · 0:05" / "on call · 0:24" (the Vimar card counts the ring).
+    // Pill without the name: "rang 08:28" / "ringing · 0:05" / "on call · 0:24" (the Vimar card counts the ring);
+    // a notice (the Vimar card's .err) takes its place: in the live overlay the .err row is hidden.
     _tickSetup() {
       super._tickSetup();
       const s = this._state;
@@ -515,41 +569,47 @@ customElements.whenDefined(VIMAR).then(() => {
         this._lineT = this._lineAt = null;
       }
       const T = this._t;
-      this._badge.textContent = s === "ringing" ? `${T.ringing} · ${mmss(this._lastRing)}`
+      this._badge.textContent = this._err.textContent || (s === "ringing" ? `${T.ringing} · ${mmss(this._lastRing)}`
         : s === "in_call" ? `${T.on_call} · ${mmss(this._lineAt)}`
         : s === "calling" ? T.connecting
-        : this._lastRing ? `${T.rang} ${hhmm(this._lastRing, T)}` : T.live;
+        : this._lastRing ? `${T.rang} ${hhmm(this._lastRing, T)}` : T.live);
     }
 
-    // Live video: a <video> on the PeerConnection; at rest the Vimar card (picture-entity of the camera).
+    // Live video: go2rtc's player (it plays, reconnects and picks the mode; the card only reads its <video>'s
+    // events); at rest the Vimar card (picture-entity of the camera).
     // Never with the page hidden (_onPageState): iOS keeps WebRTC audio playing in the background.
     _setVideo(live) {
       const always = !!this._cfg.always_live && this._state !== "offline" && (!this._popup || this._pop.open);
       live = !this._hidden && (live || always);
       if (this._live === live) return;
       this._closePeer();
-      this._connected = this._fellBack = false;
-      this._card.classList.remove("fb");
-      // Camera's latest picture (Frigate latest.jpg via HA's proxy, ~0.2 s): covers the WebRTC wait (~2 s, waits
-      // for the key frame) and is the background at rest.
+      this._connected = false;
+      // Camera's latest picture (Frigate latest.jpg via HA's proxy, ~0.2 s): covers the wait for the first frame
+      // and is the background at rest.
       const pic = this._hass?.states[this._cfg.camera]?.attributes?.entity_picture;
       if (pic) this._still.src = pic; else this._still.removeAttribute("src");
       if (!live) return super._setVideo(false);
       this._live = true;
       this._video = null;
       this._card.classList.add("wait");
-      const v = (this._v = this._newVideo());
-      this._videoBox.replaceChildren(v);
-      this._connect(v);
-    }
-
-    _newVideo() {
-      const v = document.createElement("video");
-      v.autoplay = v.playsInline = v.muted = true;
-      // First frame = connected: "playing", or loadedmetadata/resize with a size (WebKit may never fire "playing"
-      // for a MediaStream). Not for a background retry still detached (_probe).
-      v.onplaying = v.onloadedmetadata = v.onresize = () => this._v === v && v.videoWidth && this._onVideo();
-      return v;
+      const el = (this._rtc = document.createElement(VIDEO));
+      el.mode = "webrtc,mse,mjpeg";
+      el.media = "video,audio";
+      el.sign = () => this._hass.callWS({ type: "auth/sign_path", expires: 30,
+        path: `/api/frigate/${this._cfg.frigate_instance}/mse/api/ws?src=${encodeURIComponent(this._cfg.stream)}` })
+        .then(({ path }) => location.origin.replace(/^http/, "ws") + path);
+      // First frame: "playing", or loadeddata/resize with a size (WebKit may never fire "playing" for a MediaStream).
+      // Caught on the player (capture): its <video> exists only once the card is in the page. _v from then on.
+      const first = (v) => { if (this._rtc === el && (v.videoWidth || v.poster)) { this._v = v; this._onVideo(); } };
+      for (const t of ["playing", "loadeddata", "resize"]) el.addEventListener(t, (e) => first(e.target), true);
+      el.onframe = () => first(el.video);
+      el.onblocked = () => {  // unmuted without a real tap (iOS): back to muted, the speaker button asks for the tap
+        if (this._rtc !== el) return;
+        this._audible = false;
+        this._audioBlocked = true;
+        this._render();
+      };
+      this._videoBox.replaceChildren(el);
     }
 
     _ar() {
@@ -569,164 +629,14 @@ customElements.whenDefined(VIMAR).then(() => {
     _onVideo() {
       this._shape(this._v?.videoWidth, this._v?.videoHeight);
       this._connected = true;
-      this._retry = 0;
       this._card.classList.remove("wait");
       if (this._session === "calling") this._session = "in_call";
       this._render();
-    }
-
-    // Live: video + visitor voice, receive only (no talk channel at rest, see _micLeg).
-    _connect(v) {
-      if (!window.RTCPeerConnection) return this._fallback("no WebRTC in this browser");  // e.g. iOS Lockdown Mode
-      const pc = (this._pc = new RTCPeerConnection());
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
-      const ms = new MediaStream();
-      // srcObject once (a second assignment reloads the element: AbortError, paused again) and play() right after
-      // it, never before: a play() on an element that still has no source leaves WebKit stuck (no frame, no event).
-      pc.ontrack = (e) => { ms.addTrack(e.track); if (!v.srcObject) { v.srcObject = ms; v.play().catch(() => {}); } };
-      const fail = (why) => this._pc === pc && (this._connected ? this._drop(why) : this._fallback(why));
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed") fail("ICE failed");
-        else if (pc.connectionState === "connected" && this._fellBack && this._pc === pc) this._leaveFallback(v);
-      };
-      // No "connected" in time. Frames without the event: connected. ICE up but no frame: retried like a drop
-      // (2, 4, 8 s, then HA's stream), not straight to HA's stream: that blanked all the cards on the iPhone.
-      // ICE not through (away from home): HA's stream.
-      this._connT = setTimeout(() => {
-        if (this._connected || this._pc !== pc) return;
-        if (this._v === v && v.videoWidth) this._onVideo();
-        else fail(pc.connectionState === "connected" ? "no video" : "timeout");
-      }, CONNECT_MS);
-      this._signal(pc, fail);
-    }
-
-    // go2rtc WebSocket protocol (same as Frigate and video-rtc.js): offer -> answer, candidates.
-    // Messages for an already closed PeerConnection (reconnect, fallback) are ignored. A WebSocket closing
-    // after negotiation does not count: media flows on its own, a real drop is reported by "failed".
-    async _signal(pc, fail) {
-      const stale = () => pc.signalingState === "closed";
-      try {
-        const { path } = await this._hass.callWS({ type: "auth/sign_path",
-          path: `/api/frigate/${this._cfg.frigate_instance}/webrtc/api/ws?src=${encodeURIComponent(this._cfg.stream)}` });
-        if (stale()) return;
-        const ws = (pc.sock = new WebSocket(location.origin.replace(/^http/, "ws") + path));  // closed by hangUp
-        const send = (type, value) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type, value }));
-        ws.onopen = async () => {
-          pc.onicecandidate = (e) => send("webrtc/candidate", e.candidate ? e.candidate.candidate : "");
-          await pc.setLocalDescription(await pc.createOffer());
-          send("webrtc/offer", pc.localDescription.sdp);
-        };
-        ws.onmessage = (ev) => {
-          if (stale()) return ws.close();
-          const m = JSON.parse(ev.data);
-          if (m.type === "webrtc/answer") pc.setRemoteDescription({ type: "answer", sdp: m.value }).catch((e) => !stale() && fail(e.message));
-          else if (m.type === "webrtc/candidate") pc.addIceCandidate({ candidate: m.value, sdpMid: "0" }).catch(() => {});
-          else if (m.type === "error") fail(m.value);
-        };
-        ws.onclose = () => !stale() && pc.connectionState !== "connected" && fail("WebSocket closed");
-      } catch (e) {
-        if (!stale()) fail(e.message || e);
-      }
-    }
-
-    // WebRTC unreachable (away from home: 8555 is LAN only): HA's stream, like the Vimar card without
-    // WebCodecs. Video only, no voice or microphone. If it was already connected (at home) retry a few times first.
-    // While on HA's stream WebRTC is retried in the background (_probe); a failed retry just closes quietly.
-    _fallback(why) {
-      if (!this._live || this._connected) return;
-      if (this._fellBack) {  // background retry failed: stay on HA's stream
-        clearTimeout(this._connT);
-        hangUp(this._pc);
-        this._pc = null;
-        return;
-      }
-      // Retry first (2, 4, 8 s) after a drop, a first ICE failure (happens now and then at home) or ICE up with no
-      // frame; else (timeout: away from home) HA's stream at once.
-      const r = this._retry || 0;
-      if (r < 4 && (r || why === "ICE failed" || why === "no video")) return this._drop(why);
-      console.warn("db1c-doorbell-card: WebRTC unavailable:", why);
-      this._closePeer();
-      this._retry = 0;
-      this._fellBack = true;
-      this._card.classList.remove("wait");
-      this._card.classList.add("fb");
-      if (!this._camOnly) this._err.textContent = this._t.video_only;  // a camera has no voice or microphone
-      this._haStream();
-      if (this._session === "calling") this._session = "in_call";
-      this._probeT = setInterval(this._probe, PROBE_MS);
-      document.addEventListener("visibilitychange", this._probe);
-      this._render();
-    }
-
-    // HA's stream. A browser with native HLS (Safari, iOS) plays HA's HLS itself: HA's player offers its WebRTC
-    // first, which away from home (8555 is LAN only) neither connects nor fails, a blank box for good (2026-10-10).
-    // Else HA's card. Not _newVideo: this one is no WebRTC attempt (_v, _onVideo).
-    async _haStream() {
-      if (!document.createElement("video").canPlayType("application/vnd.apple.mpegurl")) return this._setPicture(true);
-      const req = (this._hlsReq = {});
-      const url = await this._hass.callWS({ type: "camera/stream", entity_id: this._cfg.camera }).then((r) => r.url, () => null);
-      if (!this._fellBack || this._hlsReq !== req) return;  // WebRTC came back, the live closed, or a newer fallback
-      if (!url) return this._setPicture(true);
-      this._stopHls();
-      const v = (this._hls = document.createElement("video"));
-      v.autoplay = v.playsInline = v.muted = true;
-      v.onloadedmetadata = () => this._shape(v.videoWidth, v.videoHeight, false);
-      // HA closed the stream (restart, idle, network): a new one in a while, the still shows meanwhile.
-      v.onerror = v.onended = () => this._hls === v && setTimeout(() => this._hls === v && this._haStream(), HLS_RETRY_MS);
-      v.src = url;
-      this._videoBox.replaceChildren(v);
-    }
-
-    // On HA's stream: try WebRTC again in the background; HA's stream stays until it connects.
-    _probe = () => {
-      if (this._fellBack && !this._pc && !document.hidden && window.RTCPeerConnection) this._connect(this._newVideo());
-    };
-
-    // A background retry got through: from HA's stream back to WebRTC (onplaying -> _onVideo does the rest).
-    _leaveFallback(v) {
-      this._fellBack = false;
-      this._card.classList.remove("fb");
-      this._stopHls();
-      clearInterval(this._probeT);
-      document.removeEventListener("visibilitychange", this._probe);
-      this._v = v;
-      this._video = null;
-      this._err.textContent = this._hint;
-      this._card.classList.add("wait");
-      this._videoBox.replaceChildren(v);
-      v.play().catch(() => {});
-      if (v.videoWidth) this._onVideo();  // its first frame came while detached (_v was not v yet): no event again
-    }
-
-    // Live dropped (HA/Frigate restart, network change) or failed fast: retried after 2, 4, 8 s;
-    // the fourth failed attempt switches to HA's stream (_fallback).
-    _drop(why) {
-      console.warn("db1c-doorbell-card: WebRTC dropped, retrying:", why);
-      this._closePeer();
-      this._connected = false;
-      this._retry = (this._retry || 0) + 1;
-      this._card.classList.add("wait");
-      this._retryT = setTimeout(() => { this._live = undefined; if (this._hass) this._render(); }, 1000 * 2 ** this._retry);
-      this._render();  // microphone button off at once
-    }
-
-    // iOS keeps loading (and playing) a detached <video>: _haStream's one is stopped when it leaves.
-    _stopHls() {
-      this._hls?.removeAttribute("src");
-      this._hls?.load();
-      this._hls = null;
     }
 
     _closePeer() {
-      this._stopHls();
-      clearTimeout(this._connT);
-      clearTimeout(this._retryT);
-      clearInterval(this._probeT);
-      document.removeEventListener("visibilitychange", this._probe);
-      const pc = this._pc;
-      this._pc = this._v = null;
-      hangUp(pc);
+      this._rtc?.ondisconnect();  // now, not after VideoRTC's 5 s: iOS keeps a detached <video> playing
+      this._rtc = this._v = null;
       this._endMic();
     }
 
@@ -753,109 +663,138 @@ customElements.whenDefined(VIMAR).then(() => {
       if (this._audible === "auto" && !LIVE.includes(this._state)) this._audible = false;
     }
 
-    // The only place that writes _v.muted. Unmuted without a real gesture (iOS) play() fails: back to muted.
-    // A paused <video> is restarted too: iOS pauses media elements when mic capture starts/stops.
-    // While talking the voice comes from the talk channel (_earLeg): the <video> goes quiet as soon as it flows.
+    // The only place that writes _v.muted (play, src and srcObject are the player's). While talking the voice
+    // comes from the call WebSocket: the <video> stays quiet. iOS pauses media elements when mic capture
+    // starts/stops: the player's play() restarts it; an unmuted play it refuses comes back as onblocked.
     _applyAudio() {
       const v = this._v, ear = this._ws?.ear;
-      if (ear) ear.gain.gain.value = this._audible ? 1 : 0;
-      const muted = !this._audible || !!ear?.live;
-      if (!v || !v.srcObject || (v.muted === muted && !v.paused)) return;  // no source yet: play() waits for it (WebKit)
+      if (ear) ear.gain.value = this._audible ? 1 : 0;
+      const muted = !this._audible || !!ear;
+      if (!v || (v.muted === muted && !v.paused)) return;
       v.muted = muted;
-      v.play().catch((e) => {
-        if (this._v !== v || e.name !== "NotAllowedError") return;  // AbortError: srcObject arriving, not a block
-        this._audible = false;
-        this._audioBlocked = true;
-        v.muted = true;
-        v.play().catch(() => {});
-        this._render();
-      });
+      this._rtc.play();
     }
 
-    // Talk: the flow (HTTPS, permission, answer/call, errors in words) is the Vimar card's (_startTalk);
-    // here only what to do with the microphone and the AudioContext created in the gesture: talk channel and ear.
-    // If it throws, the Vimar card stops the microphone, closes the context and writes why.
+    // Talk: the flow (HTTPS, permission, answer/call, errors in words) is the Vimar card's (_startTalk); here the
+    // call WebSocket with the microphone and the AudioContext created in the gesture. Nothing is sent before the
+    // server's "ready" (10 s at most); no "ready" (no endpoint, busy = close 4409) = no call, said in words, video
+    // untouched. Hung up or gone to the background meanwhile (_endMic closed it): just the cleanup.
     async _openAudio(mic, ctx) {
-      if (this._fellBack || !this._pc) throw new Error(this._fellBack ? this._t.away : this._t.not_live);
+      if (!this.isConnected) throw new Error("card closed");
       ctx.resume().catch(() => {});  // iOS: with the microphone the audio session changes and the context may stay suspended
-      // _ws = the Talk session object; the base card only checks it for truthiness. Synchronous from the check above: no races.
-      // `audible` = the listen state before Talk, restored by _endMic.
-      this._ws = { mic, pc: this._micLeg(mic.getAudioTracks()[0]), ctx, ear: this._earLeg(ctx), audible: this._audible };
+      const T = this._t;
+      const dial = (this._dialing = { close() { this.gone = true; } });  // hung up while signing: _endMic marks it
+      const { path } = await this._hass.callWS({ type: "auth/sign_path", expires: 30,
+        path: `/api/dahua_talk/call_ws/${encodeURIComponent(this._cfg.speaker)}` });
+      if (dial.gone) {
+        mic.getTracks().forEach((t) => t.stop());
+        return ctx.close();
+      }
+      const ws = (this._dialing = new WebSocket(location.origin.replace(/^http/, "ws") + path));
+      ws.binaryType = "arraybuffer";
+      const late = setTimeout(() => ws.close(), 10000);
+      const code = await new Promise((ok) => {
+        ws.onmessage = (e) => typeof e.data === "string" && JSON.parse(e.data).type === "ready" && ok(0);
+        ws.onclose = (e) => ok(e.code || 1006);
+      });
+      clearTimeout(late);
+      const mine = this._dialing === ws;
+      this._dialing = null;
+      if (code || !mine) {
+        ws.close();
+        mic.getTracks().forEach((t) => t.stop());
+        ctx.close();
+        if (!mine) return;
+        this._session = null;
+        this._err.textContent = code === 4409 ? T.busy : T.talk_na;
+        return this._render();
+      }
+      const ear = ctx.createGain();  // volume set by _applyAudio
+      ear.connect(ctx.destination);
+      const sink = this._earSink(ctx, ear, this._cfg.ear_buffer ?? (LAN ? 0.12 : 0.5));
+      ws.onmessage = (e) => typeof e.data !== "string" && sink(e.data);
+      ws.onclose = (e) => {
+        if (this._ws?.sock !== ws) return;  // closed by us
+        this._call("hangup");
+        this._err.textContent = e.code === 4408 ? T.call_cap : T.call_end;
+        this._tickSetup();
+      };
+      // Microphone -> 0x02 + PCM16 8 kHz (the Vimar card's capture: ScriptProcessor, plain average to resample).
+      const source = ctx.createMediaStreamSource(mic);
+      const proc = ctx.createScriptProcessor(2048, 1, 1);
+      const step = ctx.sampleRate / RATE;
+      proc.onaudioprocess = (ev) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const inp = ev.inputBuffer.getChannelData(0);
+        const n = Math.floor(inp.length / step);
+        const out = new Uint8Array(1 + n * 2);
+        const view = new DataView(out.buffer);
+        out[0] = 0x02;
+        for (let i = 0; i < n; i++) {
+          let sum = 0;
+          const a = Math.floor(i * step), b = Math.floor((i + 1) * step);
+          for (let j = a; j < b; j++) sum += inp[j];
+          const s = Math.max(-1, Math.min(1, sum / (b - a)));
+          view.setInt16(1 + i * 2, s * 32767, true);
+        }
+        ws.send(out);
+      };
+      source.connect(proc);
+      proc.connect(ctx.destination);  // needed for onaudioprocess to run (outputs silence)
+      // _ws = the call; the base card only checks it for truthiness. `audible` = the listen state before, restored by _endMic.
+      this._ws = { sock: ws, mic, ctx, ear, audible: this._audible };
       this._audible = true;  // talking = hearing
       this._audioBlocked = false;
       this._render();
     }
 
-    // Visitor voice while talking: 8 kHz PCM from dahua_talk (the doorbell mic on the talk channel), played
-    // by the Vimar card's player (_pcmSink: 8 kHz, 0x01 prefix, anti-jitter buffer). On the first chunk
-    // `live` = true and _applyAudio mutes the <video>'s RTSP audio. No data (a doorbell that does not send
-    // its mic back) changes nothing: the previous audio stays.
-    _earLeg(ctx) {
-      const ac = new AbortController(), gain = ctx.createGain(), ear = { ac, gain, live: false };
-      gain.connect(ctx.destination);  // volume set by _applyAudio
-      // The sink's play position, spied from its src.start(): when it is behind the clock the sink realigns,
-      // and the voice gets the EAR_PRE_BYTES silence in front again.
-      let end = 0;
-      const spy = new Proxy(ctx, { get: (t, k) => k === "createBufferSource" ? () => {
-        const s = t.createBufferSource(), start = s.start.bind(s);
-        s.start = (at) => { end = at + s.buffer.duration; start(at); };
-        return s;
-      } : typeof t[k] === "function" ? t[k].bind(t) : t[k] });
-      const sink = this._pcmSink(spy, gain);
-      const pre = new Uint8Array(1 + EAR_PRE_BYTES);
-      pre[0] = 1;
-      (async () => {
-        const r = await this._hass.fetchWithAuth(`/api/dahua_talk/listen/${encodeURIComponent(this._cfg.speaker)}`, { signal: ac.signal });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const reader = r.body.getReader();
-        let rest = new Uint8Array(0);
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const u = new Uint8Array(1 + rest.length + value.length);  // 0x01 + PCM16, the odd byte next time
-          u[0] = 1; u.set(rest, 1); u.set(value, 1 + rest.length);
-          const n = (u.length - 1) & ~1;
-          rest = u.slice(1 + n);
-          if (!n) continue;
-          if (!ear.live) {
-            ear.live = true;
-            this._applyAudio();
-          }
-          if (end < ctx.currentTime + 0.01) sink({ data: pre.buffer });  // same test as _pcmSink's realign
-          sink({ data: u.buffer.slice(0, 1 + n) });
+    // Visitor voice: 0x01 + PCM16 8 kHz, resampled continuously to the context's rate and played `lead` s ahead
+    // of the clock (the Vimar card's _pcmSink, copied, with the lead as a knob: ear_buffer). Each underrun adds
+    // 40 ms, up to lead + 0.2 s. A 3.6 kHz low-pass removes the linear interpolation's images.
+    _earSink(ctx, out, lead) {
+      const step = RATE / ctx.sampleRate;
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 3600;
+      lp.connect(out);
+      let playAt = 0, last = 0, pos = 0, ahead = lead, started = false;
+      return (data) => {
+        if (new Uint8Array(data, 0, 1)[0] !== 0x01) return;
+        const pcm = new Int16Array(data.slice(1, 1 + ((data.byteLength - 1) & ~1))), n = pcm.length;
+        if (!n) return;
+        const at = (i) => (i < 0 ? last : pcm[i] / 32768);  // index -1 is the previous packet's last sample
+        const count = Math.ceil((n - pos) / step);
+        const buf = ctx.createBuffer(1, count, ctx.sampleRate);
+        const ch = buf.getChannelData(0);
+        let p = pos;
+        for (let k = 0; k < count; k++, p += step) {
+          const i = Math.floor(p), f = p - i;
+          ch[k] = at(i - 1) + (at(i) - at(i - 1)) * f;
         }
-      })().catch((e) => { if (!ac.signal.aborted) console.warn("db1c-doorbell-card: visitor voice (talk):", e.message || e); })
-        .finally(() => {  // stream over (HA restart, channel dropped): the RTSP audio comes back
-          if (ear.live) { ear.live = false; if (this._ws?.ear === ear) this._applyAudio(); }
-        });
-      return ear;
-    }
-
-    // The doorbell's talk channel: a separate PeerConnection, mic only (sendonly), opened on the Talk tap and
-    // closed on the second tap (like the Frigate UI). The live stream stays as it was: the visitor voice is not
-    // interrupted, and at rest nobody holds 8557.
-    _micLeg(track) {
-      const pc = new RTCPeerConnection();
-      const fail = (why) => {
-        if (this._ws?.pc !== pc) return;
-        this._err.textContent = `${this._t.mic_err}: ${why}`;
-        if (this._session === "calling") this._session = null;  // no talk channel, no call: not a hang-up UI left behind
-        this._stopAudio();
+        pos = p - n;
+        last = pcm[n - 1] / 32768;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(lp);
+        if (playAt < ctx.currentTime + 0.01) {
+          if (started) ahead = Math.min(ahead + 0.04, lead + 0.2);  // ran dry: keep more in hand
+          started = true;
+          playAt = ctx.currentTime + ahead;
+        }
+        src.start(playAt);
+        playAt += buf.duration;
       };
-      pc.addTransceiver(track, { direction: "sendonly" });
-      pc.onconnectionstatechange = () => pc.connectionState === "failed" && fail("ICE failed");
-      this._signal(pc, fail);
-      return pc;
     }
 
     _endMic() {  // no redraw: _closePeer calls it from inside _render too (_stopAudio's redraw runs _applyAudio)
+      this._dialing?.close();  // a call still waiting for "ready": _openAudio sees it and cleans up
+      this._dialing = null;
       const a = this._ws;
       this._ws = null;
       if (!a) return false;
-      if (this._audible === true) this._audible = a.audible;  // Talk over: listening back as before (unless muted meanwhile)
+      if (this._audible === true) this._audible = a.audible;  // call over: listening back as before (unless muted meanwhile)
       a.mic.getTracks().forEach((t) => t.stop());
-      hangUp(a.pc);
-      a.ear.ac.abort();
+      a.sock.close();
       a.ctx.close();
       return true;
     }
@@ -991,12 +930,9 @@ customElements.whenDefined(VIMAR).then(() => {
 
     _goQuiet() {
       this._stopClip();
-      // iOS can keep playing a detached <video>'s audio: mute it and drop the stream before closing.
-      if (this._v) { this._v.muted = true; this._v.srcObject = null; }
-      this._closePeer();  // + talk (_endMic): mic, its PeerConnection, the ear fetch, the AudioContext
+      this._closePeer();  // the player stops at once, + the call (_endMic): mic, WebSocket, AudioContext
       this._session = null;
       this._audible = this._audioBlocked = false;
-      this._retry = 0;
     }
 
     connectedCallback() {
