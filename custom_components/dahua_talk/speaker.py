@@ -34,6 +34,9 @@ _LOGGER = logging.getLogger(__name__)
 #: Đo 29/09/2026 trên H6C: không bỏ thì cả câu trễ đúng bằng lúc chờ mở kênh (tới 1,25 s khi camera
 #: vừa đóng kênh chưa nhả) cộng 0,3 s đệm đầu câu — chủ máy: "bị trễ so với thực tế".
 TRE_SONG_GIAY = 0.15
+#: Nguồn sống: khúc đã trễ quá ngần này giây thì bỏ cả khi có tiếng — mạng điện thoại nghẽn rồi xả một loạt,
+#: phát nốt thì mọi câu sau trễ theo; tiếng nói trễ 2 s trong bộ đàm không còn dùng được.
+TRE_TOI_DA_GIAY = 2.0
 #: Dưới mức này (dBFS, RMS cả khúc) là im lặng — cũng là ngưỡng "có tiếng người" của bộ đàm.
 NGUONG_IM_DB = -45.0
 
@@ -112,19 +115,21 @@ class Speaker:
         phiên nếu khác, rồi phát. Trả số giây.
 
         ``song``: nguồn sống — phần tử hàng đợi là ``(lúc tới, PCM)``; khúc im lặng đã trễ quá
-        ``TRE_SONG_GIAY`` thì bỏ.
+        ``TRE_SONG_GIAY`` thì bỏ, mọi khúc nằm trong hàng quá ``TRE_TOI_DA_GIAY`` (tính từ lúc kênh mở) cũng bỏ.
         ``huy``: đặt thì thôi phát ngay sau khúc đang gửi — bỏ phần còn trong hàng đợi, đóng kênh."""
         giay = bo = 0.0
         huy = huy or threading.Event()
         with self._mo_phien() as s:
+            mo_luc = time.monotonic()                   # chờ mở kênh (đăng nhập, camera bận) không tính là trễ
             ra = int(getattr(s, "tan_so", TAN_SO))
             khoi = KHOI * ra // TAN_SO                  # 40 ms
             du = b""
             while not huy.is_set() and (muc := hang.get()) is not None:
                 if song:
                     luc_toi, khuc = muc
-                    if (time.monotonic() - luc_toi > TRE_SONG_GIAY
-                            and muc_db(khuc) <= NGUONG_IM_DB):
+                    bay_gio = time.monotonic()
+                    if (bay_gio - max(luc_toi, mo_luc) > TRE_TOI_DA_GIAY
+                            or (bay_gio - luc_toi > TRE_SONG_GIAY and muc_db(khuc) <= NGUONG_IM_DB)):
                         bo += len(khuc) / (2 * vao)
                         continue
                 else:
@@ -141,7 +146,7 @@ class Speaker:
                 self.het_tieng = time.monotonic()
                 giay += len(du) / (2 * ra)
         if bo:
-            _LOGGER.debug("live source: skipped %.2f s of silence to catch up, played %.2f s", bo, giay)
+            _LOGGER.debug("live source: skipped %.2f s (silence or too late) to catch up, played %.2f s", bo, giay)
         return giay
 
     async def async_close(self) -> None:

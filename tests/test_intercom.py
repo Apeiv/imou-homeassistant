@@ -1,13 +1,18 @@
 """Bộ đàm trong HA: go2rtc POST A-law 8 kHz → loa camera, không cần dịch vụ ngoài."""
 
 import asyncio
+import bisect
 import math
 import struct
 from types import SimpleNamespace
 from unittest import mock
 
+import aiohttp
+import pytest
+import voluptuous as vol
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 
 from custom_components.dahua_talk import intercom
@@ -27,7 +32,6 @@ def _im(giay: float) -> bytes:
 
 def _alaw(pcm: bytes) -> bytes:
     """Mã hoá bằng tra ngược bảng giải — đủ cho đo mức."""
-    import bisect
     goc = sorted(range(256), key=lambda a: intercom._ALAW[a])
     gt = [intercom._ALAW[a] for a in goc]
     ra = bytearray()
@@ -85,6 +89,25 @@ def _muc():
         "username": "admin", "password": "mk", "mic_url": ""})
 
 
+def _hik():
+    return MockConfigEntry(domain=DOMAIN, title="Cam hik", data={
+        "name": "Cam hik", "host": "192.168.1.66", "port": 554, "username": "admin", "password": "mk",
+        "mic_url": "", "talk_protocol": "hik", "hik_port": 8443})
+
+
+def _mp_cua(hass, muc):
+    return next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
+                if e.domain == "media_player")
+
+
+async def _cho_het_goi(muc):
+    for _ in range(100):
+        if muc.entry_id not in intercom._DANG_GOI:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("cuộc gọi không đóng")
+
+
 async def _nap(hass, muc):
     assert await async_setup_component(hass, "homeassistant", {})
     assert await async_setup_component(hass, "http", {})
@@ -106,9 +129,7 @@ async def test_khoa_sinh_mot_lan_va_giu_nguyen(hass):
 async def test_dich_vu_tra_dong_go2rtc(hass):
     muc = _muc()
     await _nap(hass, muc)
-    from homeassistant.helpers import entity_registry as er
-    mp = next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
-              if e.domain == "media_player")
+    mp = _mp_cua(hass, muc)
     kq = await hass.services.async_call(DOMAIN, "get_intercom_source", {"entity_id": mp},
                                         blocking=True, return_response=True)
     nguon = kq["source"]
@@ -139,14 +160,9 @@ async def test_post_khoa_sai_bi_chan_khoa_dung_thi_phat(hass, hass_client_no_aut
 
 async def test_ha_url_cho_go2rtc_o_may_khac(hass):
     """Proxmox / Frigate / container mạng bridge: go2rtc không gọi được 127.0.0.1 của HA."""
-    import pytest
-    import voluptuous as vol
-
     muc = _muc()
     await _nap(hass, muc)
-    from homeassistant.helpers import entity_registry as er
-    mp = next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
-              if e.domain == "media_player")
+    mp = _mp_cua(hass, muc)
     kq = await hass.services.async_call(DOMAIN, "get_intercom_source",
                                         {"entity_id": mp, "ha_url": "http://192.168.1.10:8123/"},
                                         blocking=True, return_response=True)
@@ -171,24 +187,17 @@ async def test_hai_chieu_mo_ngay_va_khong_dong_khi_im(hass):
 
 async def test_nghe_phat_tieng_camera_cho_the(hass, hass_client):
     """Chỉ camera HCNetSDK có tiếng về: mục Dahua trả 404; thẻ ngắt lúc camera im → bỏ đăng ký ngay."""
-    from homeassistant.helpers import entity_registry as er
-
-    def _mp(muc):
-        return next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
-                    if e.domain == "media_player")
 
     dahua = _muc()
     await _nap(hass, dahua)
     client = await hass_client()
-    assert (await client.get(f"/api/dahua_talk/listen/{_mp(dahua)}")).status == 404
+    assert (await client.get(f"/api/dahua_talk/listen/{_mp_cua(hass, dahua)}")).status == 404
     assert (await client.get("/api/dahua_talk/listen/media_player.khong_co")).status == 404
-    muc = MockConfigEntry(domain=DOMAIN, title="Cam hik", data={
-        "name": "Cam hik", "host": "192.168.1.66", "port": 554, "username": "admin", "password": "mk",
-        "mic_url": "", "talk_protocol": "hik", "hik_port": 8443})
+    muc = _hik()
     muc.add_to_hass(hass)
     assert await hass.config_entries.async_setup(muc.entry_id)
     await hass.async_block_till_done()
-    r = await client.get(f"/api/dahua_talk/listen/{_mp(muc)}")
+    r = await client.get(f"/api/dahua_talk/listen/{_mp_cua(hass, muc)}")
     assert r.status == 200
     nghe = muc.runtime_data.mic_camera
     await asyncio.sleep(0)
@@ -267,13 +276,9 @@ async def test_nghe_dong_tha_ca_hang_day(hass):
 
 
 async def test_listen_sau_go_muc_tra_404(hass, hass_client):
-    from homeassistant.helpers import entity_registry as er
-    muc = MockConfigEntry(domain=DOMAIN, title="Cam hik", data={
-        "name": "Cam hik", "host": "192.168.1.66", "port": 554, "username": "admin", "password": "mk",
-        "mic_url": "", "talk_protocol": "hik", "hik_port": 8443})
+    muc = _hik()
     await _nap(hass, muc)
-    mp = next(e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), muc.entry_id)
-              if e.domain == "media_player")
+    mp = _mp_cua(hass, muc)
     client = await hass_client()
     r = await client.get(f"/api/dahua_talk/listen/{mp}")
     assert r.status == 200
@@ -282,3 +287,102 @@ async def test_listen_sau_go_muc_tra_404(hass, hass_client):
     assert await hass.config_entries.async_unload(muc.entry_id)   # gỡ mục: người đang nghe được thả
     assert await r.content.read() == b""
     assert (await client.get(f"/api/dahua_talk/listen/{mp}")).status == 404
+
+
+async def test_call_ws_chan_khong_token_va_muc_khong_phai_hik(hass, hass_client, hass_client_no_auth):
+    dahua, hik = _muc(), _hik()
+    await _nap(hass, dahua)
+    hik.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(hik.entry_id)
+    await hass.async_block_till_done()
+    with pytest.raises(aiohttp.WSServerHandshakeError) as loi:
+        await (await hass_client_no_auth()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, hik)}")
+    assert loi.value.status == 401
+    client = await hass_client()
+    for eid in (_mp_cua(hass, dahua), "media_player.khong_co"):
+        with pytest.raises(aiohttp.WSServerHandshakeError) as loi:
+            await client.ws_connect(f"/api/dahua_talk/call_ws/{eid}")
+        assert loi.value.status == 404
+    assert not hik.runtime_data.mic_camera.nguoi_nghe
+
+
+async def test_call_ws_hai_chieu_va_chi_mo_kenh_khi_co_0x02(hass, hass_client):
+    muc = _hik()
+    await _nap(hass, muc)
+    loa = LoaGia()
+    goi = mock.AsyncMock(side_effect=loa.async_play_pcm)
+    with mock.patch.object(Speaker, "async_play_pcm", goi):
+        ws = await (await hass_client()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}")
+        assert await ws.receive_json() == {"type": "ready"}
+        await ws.send_bytes(b"\x01" + _song(0.1, -20))   # byte đầu lạ, khung chữ: bỏ qua
+        await ws.send_str("xin chào")
+        await asyncio.sleep(0.1)
+        assert not goi.called                           # chưa có 0x02: kênh nói HCNetSDK chưa mở
+        tieng = _song(0.2, -20)
+        await ws.send_bytes(b"\x02" + tieng)
+        nghe = muc.runtime_data.mic_camera
+        nghe.feed(b"\x05\x06" * 160)                    # tiếng camera về
+        msg = await ws.receive()
+        assert msg.data == b"\x01" + b"\x05\x06" * 160
+        await ws.close()
+        await _cho_het_goi(muc)
+    assert goi.call_count == 1 and loa.phien == [tieng]
+    assert not nghe.nguoi_nghe
+
+
+async def test_call_ws_cuoc_thu_hai_bao_ban(hass, hass_client):
+    muc = _hik()
+    await _nap(hass, muc)
+    client = await hass_client()
+    duong = f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}"
+    ws1 = await client.ws_connect(duong)
+    assert await ws1.receive_json() == {"type": "ready"}
+    ws2 = await client.ws_connect(duong)
+    assert (await ws2.receive()).type == aiohttp.WSMsgType.CLOSE and ws2.close_code == intercom.MA_BAN
+    assert len(muc.runtime_data.mic_camera.nguoi_nghe) == 1
+    await ws1.close()
+    await _cho_het_goi(muc)
+    ws3 = await client.ws_connect(duong)
+    assert await ws3.receive_json() == {"type": "ready"}
+    await ws3.close()
+    await _cho_het_goi(muc)
+
+
+async def test_call_ws_qua_tran_thi_cup_may(hass, hass_client, monkeypatch):
+    monkeypatch.setattr(intercom, "TOI_DA_NOI_GIAY", 0.2)
+    muc = _hik()
+    await _nap(hass, muc)
+    ws = await (await hass_client()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}")
+    assert await ws.receive_json() == {"type": "ready"}
+    assert (await ws.receive()).type == aiohttp.WSMsgType.CLOSE and ws.close_code == intercom.MA_HET_GIO
+    await _cho_het_goi(muc)
+    assert not muc.runtime_data.mic_camera.nguoi_nghe
+
+
+async def test_call_ws_go_muc_thi_dong(hass, hass_client):
+    muc = _hik()
+    await _nap(hass, muc)
+    ws = await (await hass_client()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}")
+    assert await ws.receive_json() == {"type": "ready"}
+    assert await hass.config_entries.async_unload(muc.entry_id)
+    assert (await ws.receive()).type == aiohttp.WSMsgType.CLOSE
+    await _cho_het_goi(muc)
+
+
+async def test_call_ws_loa_dang_phat_thi_ban(hass, hass_client):
+    """TTS / thông báo / bộ đàm go2rtc đang giữ loa: cuộc gọi không chen vào."""
+    muc = _hik()
+    await _nap(hass, muc)
+    muc.runtime_data.speaker.playing = True
+    ws = await (await hass_client()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}")
+    assert (await ws.receive()).type == aiohttp.WSMsgType.CLOSE and ws.close_code == intercom.MA_BAN
+    assert not muc.runtime_data.mic_camera.nguoi_nghe and muc.entry_id not in intercom._DANG_GOI
+
+
+async def test_call_ws_loi_van_tha_ban(hass, hass_client):
+    muc = _hik()
+    await _nap(hass, muc)
+    with mock.patch.object(intercom.CallView, "_goi", side_effect=RuntimeError("hỏng")):
+        with pytest.raises(aiohttp.WSServerHandshakeError):
+            await (await hass_client()).ws_connect(f"/api/dahua_talk/call_ws/{_mp_cua(hass, muc)}")
+    assert muc.entry_id not in intercom._DANG_GOI

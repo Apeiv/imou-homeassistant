@@ -11,6 +11,9 @@ mở — mở kênh suốt thì không bao giờ nghe được người bên cam
 ``nghe`` (đàm thoại HAI CHIỀU): tiếng mic camera về ngay trên kênh đàm thoại (``Nghe`` → ``NgheView``
 cho thẻ), nên kênh mở suốt lượt bộ đàm, không VOX.
 
+``CallView`` gộp cả hai chiều vào một WebSocket (``/api/dahua_talk/call_ws/<media_player>``, chỉ HCNetSDK):
+mic thẻ lên loa, tiếng camera xuống thẻ, mỗi camera một cuộc, tối đa ``TOI_DA_NOI_GIAY`` giây.
+
 go2rtc không gửi được header ``Authorization`` từ lệnh exec, nên đường POST dùng
 khoá ngẫu nhiên riêng từng camera trong URL; khoá chỉ phát được tiếng ra loa của
 đúng camera ấy.
@@ -26,7 +29,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
@@ -224,6 +227,15 @@ class Nghe:
             hang.put_nowait(None)
 
 
+def _nghe_theo_entity(hass: HomeAssistant, entity_id: str) -> tuple[ConfigEntry | None, Nghe | None]:
+    """Mục và ``Nghe`` của ``entity_id`` — ``Nghe`` là None khi không phải HCNetSDK hay mục đã gỡ."""
+    entry = muc_theo_entity(hass, entity_id)
+    nghe = getattr(getattr(entry, "runtime_data", None), "mic_camera", None)
+    return entry, (nghe if nghe is not None and not nghe.da_dong else None)
+
+
+# ponytail: NgheView và IntercomView còn giữ tới khi thẻ mới (``CallView``) được thử thật; sau đó bỏ được
+# nếu không ai dùng.
 class NgheView(HomeAssistantView):
     """Thẻ GET (token HA) → luồng PCM16 LE mono ``TAN_SO`` Hz tiếng camera trong lúc nói, tới khi thẻ ngắt."""
 
@@ -232,9 +244,8 @@ class NgheView(HomeAssistantView):
 
     async def get(self, request: web.Request, entity_id: str) -> web.StreamResponse:
         hass: HomeAssistant = request.app["hass"]
-        entry = muc_theo_entity(hass, entity_id)
-        nghe = getattr(getattr(entry, "runtime_data", None), "mic_camera", None)
-        if nghe is None or nghe.da_dong:
+        _entry, nghe = _nghe_theo_entity(hass, entity_id)
+        if nghe is None:
             return web.Response(status=404)
         resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Cache-Control": "no-store"})
         hang: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -253,6 +264,84 @@ class NgheView(HomeAssistantView):
         finally:
             nghe.nguoi_nghe.discard(hang)
         return resp
+
+
+#: Mục đang có cuộc gọi qua ``CallView`` — mỗi mục một cuộc.
+_DANG_GOI: set[str] = set()
+#: Byte đầu mỗi khung nhị phân của ``CallView``: tiếng camera xuống thẻ / mic thẻ lên loa camera.
+KHUNG_XUONG = b"\x01"
+KHUNG_LEN = b"\x02"
+#: Mã đóng WebSocket: đang bận (cuộc khác hay loa đang phát) / hết ``TOI_DA_NOI_GIAY``.
+MA_BAN, MA_HET_GIO = 4409, 4408
+
+
+class CallView(HomeAssistantView):
+    """Thẻ mở WebSocket (token HA hoặc đường ký ``auth/sign_path``; mọi người dùng đã đăng nhập, không chỉ admin)
+    → đàm thoại hai chiều trên một kết nối. Chỉ HCNetSDK (``mic_camera``), khác thì 404 trước khi nâng cấp.
+
+    Sau khi nâng cấp HA gửi chữ ``{"type": "ready"}``. Thẻ → HA: ``KHUNG_LEN`` + PCM16 LE mono ``TAN_SO`` Hz →
+    ``Intercom`` (kênh nói chỉ mở ở khung đầu tiên); khung khác thì bỏ. HA → thẻ: tiếng mic camera (``Nghe``)
+    thành ``KHUNG_XUONG`` + PCM. Mỗi mục một cuộc, loa đang phát cũng tính là bận: đóng ngay mã ``MA_BAN``.
+    Quá ``TOI_DA_NOI_GIAY`` giây: đóng mã ``MA_HET_GIO``."""
+
+    url = "/api/dahua_talk/call_ws/{entity_id}"
+    name = "api:dahua_talk:call_ws"
+
+    async def get(self, request: web.Request, entity_id: str) -> web.StreamResponse:
+        hass: HomeAssistant = request.app["hass"]
+        entry, nghe = _nghe_theo_entity(hass, entity_id)
+        if nghe is None:
+            return web.Response(status=404)
+        # Ping 30 s: Cloudflare đóng WebSocket lặng ~100 s. Khung 64 KiB là thừa cho mic (~4 s PCM 8 kHz).
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 16)
+        loa = entry.runtime_data.speaker
+        if entry.entry_id in _DANG_GOI or loa.playing:     # TTS, thông báo hay bộ đàm go2rtc đang giữ loa
+            await ws.prepare(request)
+            await ws.close(code=MA_BAN)
+            return ws
+        _DANG_GOI.add(entry.entry_id)
+        try:
+            await self._goi(hass, request, ws, entry, nghe)
+        finally:
+            _DANG_GOI.discard(entry.entry_id)        # lỗi gì cũng không để mục "bận" mãi
+        return ws
+
+    async def _goi(self, hass: HomeAssistant, request: web.Request, ws: web.WebSocketResponse,
+                   entry: ConfigEntry, nghe: Nghe) -> None:
+        hang: asyncio.Queue[bytes | None] = asyncio.Queue()
+        nghe.nguoi_nghe.add(hang)                    # trước ``await``: gỡ mục lúc ấy vẫn thả được hàng này
+        phien = Intercom(hass, entry.runtime_data.speaker)
+
+        async def _gui() -> None:
+            while (pcm := await hang.get()) is not None:
+                await ws.send_bytes(KHUNG_XUONG + pcm)
+
+        async def _nhan() -> None:
+            async for msg in ws:                     # khung khác ``KHUNG_LEN`` (kể cả chữ) thì bỏ qua
+                if msg.type == WSMsgType.BINARY and msg.data[:1] == KHUNG_LEN:
+                    phien.feed(msg.data[1:])
+
+        viec: list[asyncio.Task] = []
+        _LOGGER.debug("call %s: open", entry.title)
+        try:
+            await ws.prepare(request)
+            await ws.send_json({"type": "ready"})
+            viec = [asyncio.create_task(_gui()), asyncio.create_task(_nhan())]
+            xong, _ = await asyncio.wait(viec, timeout=TOI_DA_NOI_GIAY, return_when=asyncio.FIRST_COMPLETED)
+            if not xong:
+                _LOGGER.info("call %s: %.0f s limit reached, hanging up", entry.title, TOI_DA_NOI_GIAY)
+                await ws.close(code=MA_HET_GIO)
+        finally:
+            for v in viec:
+                v.cancel()
+            nghe.nguoi_nghe.discard(hang)
+            for kq in await asyncio.gather(*viec, return_exceptions=True):
+                if isinstance(kq, Exception):        # thẻ rớt mạng giữa chừng: bình thường
+                    _LOGGER.debug("call %s: %r", entry.title, kq)
+            await phien.async_close()
+            if ws.prepared:
+                await ws.close()
+            _LOGGER.debug("call %s: closed, %.1f s played", entry.title, phien.seconds)
 
 
 def go2rtc_source(hass: HomeAssistant, entry_id: str, key: str, ha_url: str = "") -> str:

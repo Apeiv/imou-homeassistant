@@ -59,6 +59,19 @@ streams:
 - **HCNetSDK:** nghỉ giữa câu 1,5–3,5 giây thì câu sau trễ ~1,2 giây — camera cần chừng đó mới
   mở lại kênh vừa đóng, và mic camera câm suốt lúc kênh mở nên không giữ kênh mở được.
 
+### Cuộc gọi qua WebSocket (`call_ws`, chỉ HCNetSDK)
+
+Thẻ tự viết nói và nghe trên **một** WebSocket qua HA, không cần go2rtc cho tiếng (đi được qua
+Cloudflare Tunnel): `wss://<ha>/api/dahua_talk/call_ws/<media_player của camera>`, kèm token HA hoặc
+đường ký `auth/sign_path` — mọi người dùng đã đăng nhập, không chỉ admin. Camera không phải HCNetSDK: 404.
+
+- Mở xong HA gửi chữ `{"type":"ready"}`.
+- Thẻ → HA: khung nhị phân `0x02` + PCM16 LE mono 8 kHz (mic). Kênh nói chỉ mở ở khung `0x02` đầu tiên;
+  khung khác bị bỏ qua. Tiếng tới trễ quá 2 s thì bỏ.
+- HA → thẻ: khung nhị phân `0x01` + PCM16 LE mono 8 kHz (mic camera).
+- Mỗi camera một cuộc; đang có cuộc khác hay loa đang phát (TTS, thông báo, bộ đàm go2rtc): đóng mã **4409**.
+- Tối đa 180 s rồi đóng mã **4408**. Ping mỗi 30 s.
+
 ## Sự cố thường gặp
 
 | Hiện tượng | Cách xử lý |

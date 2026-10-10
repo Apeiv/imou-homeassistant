@@ -36,7 +36,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (CONF_MIC_URL, CONF_RTSP_PATH, CONF_TALK, DEFAULT_PORT, DEFAULT_RTSP_PATH,
                     CONF_HIK_PORT, DOMAIN, HIK_SDK_DIR, TALK_HIK, TALK_RTSP)
-from .intercom import CONF_INTERCOM_KEY, IntercomView, Nghe, NgheView, go2rtc_source, muc_theo_entity
+from .intercom import CONF_INTERCOM_KEY, CallView, IntercomView, Nghe, NgheView, go2rtc_source, muc_theo_entity
 from .hik_talk import CONG_HIK, MoPhienHik
 from .http_talk import MoPhienImou
 from .rtsp_intercom import MayChuBoDam, go2rtc_rtsp_source
@@ -100,6 +100,7 @@ type DahuaTalkConfigEntry = ConfigEntry[DahuaTalkData]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(IntercomView())
     hass.http.register_view(NgheView())
+    hass.http.register_view(CallView())
     may_chu = MayChuBoDam(hass)
     if await may_chu.async_start():
         async def _dung(_e: Event) -> None:

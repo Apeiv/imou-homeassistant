@@ -153,3 +153,21 @@ def test_am_luong_ap_cho_nhac_khong_ap_cho_bo_dam():
         hang.put(None)
         loa._phien(hang, TS, song)
         assert struct.unpack_from("<h", phien.gui[0][1])[0] == mong
+
+
+def test_khuc_tre_qua_lau_bi_bo_ca_khi_co_tieng(monkeypatch):
+    """Mạng nghẽn rồi xả một loạt: tiếng nằm trong hàng quá ``TRE_TOI_DA_GIAY`` thì bỏ, khỏi kéo trễ cả cuộc gọi.
+    Lúc chờ mở kênh (đăng nhập HCNetSDK, camera bận) không tính: câu đầu xếp hàng trước khi kênh mở vẫn phát."""
+    monkeypatch.setattr(speaker, "TRE_TOI_DA_GIAY", 0.3)
+    phien = _Phien(0.5)                            # mở kênh lâu hơn ngưỡng
+    loa = speaker.Speaker(None, lambda: phien)
+    hang: queue.Queue = queue.Queue()
+    t0 = time.monotonic()
+    cau1, cau2 = _song(0.2), _song(0.6, CAU_2)     # cả hai xếp hàng trước khi kênh mở
+    for k in cau1 + cau2:
+        hang.put((t0, k))
+    hang.put(None)
+    loa._phien(hang, TS, song=True)
+    gui = b"".join(p for _t, p in phien.gui)
+    assert gui.startswith(b"".join(cau1))          # câu đầu không mất vì chờ mở kênh
+    assert len(gui) < 2 * TS * 0.5                 # đuôi câu 2 nằm hàng > 0,3 s sau khi mở: bỏ
