@@ -40,7 +40,7 @@ import { VideoRTC } from "./go2rtc/video-rtc.js";
 
 const VIMAR = "vimar-intercom-card";
 const TAG = "db1c-doorbell-card";
-const VIDEO = TAG + "-video-rtc";  // the player below: its own per card tag, a beta copy on the same page never replaces it
+const VIDEO = TAG + "-video-rtc";  // per card tag: a beta copy gets its own player
 const STATUS = "sensor.__db1c_status";       // fake: they only exist in the hass the Vimar card sees
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
@@ -260,7 +260,8 @@ customElements.whenDefined(VIMAR).then(() => {
       }, true);
       // WebKit plays a WebRTC stream given to a <video> below the fold without ever showing it (readyState 0, also
       // once on screen): off screen the clock waits, back on screen such a stream is asked for again.
-      new IntersectionObserver(([e]) => {
+      new IntersectionObserver((en) => {
+        const e = en[en.length - 1];  // a batch (rotation): the latest state
         this.seen = e.isIntersecting;
         if (!this.seen) this.unseen = true;
         else if (this.unseen && !this.framed && this.video.srcObject instanceof MediaStream) this._restart();
@@ -336,7 +337,7 @@ customElements.whenDefined(VIMAR).then(() => {
         const sb = add.call(ms, type);
         Object.defineProperty(sb, "buffered", { get: () => { try { return get.call(sb); } catch { return null; } } });
         const remove = sb.remove;
-        sb.remove = (start, end) => { try { remove.call(sb, start, end); } catch { /* the next updateend trims */ } };
+        sb.remove = (start, end) => { try { remove.call(sb, start, end); } catch { /* tried again on the next updateend */ } };
         return sb;
       };
     }
@@ -378,6 +379,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const first = !this.framed;
       this._arm();
       this.framed = true;
+      if (this.seen) this.unseen = false;  // painting on screen: the next failure counts again
       if (first) this.onframe?.();
     }
 
@@ -394,7 +396,10 @@ customElements.whenDefined(VIMAR).then(() => {
     _restart() {
       if (!this.isConnected) return;
       if (document.hidden) return document.addEventListener("visibilitychange", () => this._arm(), { once: true });
-      if (this.seen === false) return (this.wdTID = setTimeout(() => this._restart(), FRAME_TIMEOUT));
+      if (this.seen === false) {
+        clearTimeout(this.wdTID);  // also called by an error: one clock only
+        return (this.wdTID = setTimeout(() => this._restart(), FRAME_TIMEOUT));
+      }
       if (this.video.paused && this.video.readyState >= 2) {
         return this.video.addEventListener("play", () => this._arm(), { once: true });
       }
@@ -619,7 +624,7 @@ customElements.whenDefined(VIMAR).then(() => {
       this._clipV.onwaiting = load(true);
       this._clipV.onplaying = this._clipV.oncanplay = this._clipV.onerror = this._clipV.onpause = load(false);
       this._clipV.onvolumechange = this._clipV.onplay = ({ target: v }) => {  // native volume, or an unmuted play
-        if (!v.muted && heardClip !== v) { if (heardClip) heardClip.muted = true; heardClip = v; }
+        if (!v.muted && !v.paused && heardClip !== v) { if (heardClip) heardClip.muted = true; heardClip = v; }
       };
       this._back = $("#back");
       this._back.onclick = () => this._stopClip();
@@ -1160,6 +1165,11 @@ customElements.whenDefined(VIMAR).then(() => {
       this._hidden = pageGone();
       super.connectedCallback();
       if (this._clipPlay && this._card.classList.contains("clip")) this._clipV.play().catch(() => {});  // the move paused it
+      // A modal <dialog> taken out of the page leaves the top layer: back open but inline. Modal again, no close event
+      // (the Vimar popup's would hang up the call).
+      for (const d of this._root?.querySelectorAll("dialog[open]") ?? []) {
+        if (!d.matches(":modal")) { d.removeAttribute("open"); d.showModal(); }
+      }
     }
 
     // Back within 1 s = only moved in the page (masonry rebuilds its columns on rotation, awaiting each card's
