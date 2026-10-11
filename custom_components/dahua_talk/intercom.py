@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import WSMsgType, web
 
-from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -267,9 +267,9 @@ class NgheView(HomeAssistantView):
         return resp
 
 
-#: Mục đang có cuộc gọi qua ``CallView`` — mỗi mục một cuộc: entry_id → (WebSocket, user id).
-_DANG_GOI: dict[str, tuple[web.WebSocketResponse, str]] = {}
-#: Cuộc cũ đã ngắt / cùng người dùng gọi lại: chờ cuộc cũ nhả loa tối đa ngần này giây rồi mới báo bận.
+#: Mục đang có cuộc gọi qua ``CallView`` — mỗi mục một cuộc: entry_id → WebSocket.
+_DANG_GOI: dict[str, web.WebSocketResponse] = {}
+#: Cuộc cũ đã ngắt: chờ cuộc cũ nhả loa tối đa ngần này giây rồi mới báo bận.
 CHO_NHA_GIAY = 5.0
 #: Byte đầu mỗi khung nhị phân của ``CallView``: tiếng camera xuống thẻ / mic thẻ lên loa camera.
 KHUNG_XUONG = b"\x01"
@@ -298,24 +298,22 @@ class CallView(HomeAssistantView):
         # Ping 15 s (pong 7,5 s): thẻ biến mất (Wi-Fi → 5G) thì ≤ 23 s là nhả loa, mà 5G/tunnel khựng vài giây không
         # rớt cuộc gọi; Cloudflare đóng WebSocket lặng ~100 s. Khung 64 KiB là thừa cho mic (~4 s PCM 8 kHz).
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1 << 16)
-        loa, ma, user = entry.runtime_data.speaker, entry.entry_id, request[KEY_HASS_USER].id
+        loa, ma = entry.runtime_data.speaker, entry.entry_id
         cu = _DANG_GOI.get(ma)
-        if cu and (cu[0].closed or cu[1] == user):  # vừa cúp rồi gọi lại, hay chính người ấy từ máy khác: thay cuộc cũ
+        if cu and cu.closed:                         # vừa cúp rồi gọi lại: chờ cuộc cũ nhả loa
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(CHO_NHA_GIAY):
-                    if cu[0].prepared:              # chưa prepare thì close() ném RuntimeError: chỉ chờ
-                        await cu[0].close()
                     while ma in _DANG_GOI or loa.playing:
                         await asyncio.sleep(0.05)
-        if ma in _DANG_GOI or loa.playing:           # người khác đang gọi; TTS, thông báo hay bộ đàm go2rtc giữ loa
+        if ma in _DANG_GOI or loa.playing:           # máy khác (ai cũng vậy) đang gọi; TTS, thông báo hay bộ đàm go2rtc giữ loa
             await ws.prepare(request)
             await ws.close(code=MA_BAN)
             return ws
-        _DANG_GOI[ma] = (ws, user)
+        _DANG_GOI[ma] = ws
         try:
             await self._goi(hass, request, ws, entry, nghe)
         finally:
-            if _DANG_GOI.get(ma, (None,))[0] is ws:  # lỗi gì cũng không để mục "bận" mãi; mục của cuộc mới thì để
+            if _DANG_GOI.get(ma) is ws:  # lỗi gì cũng không để mục "bận" mãi; mục của cuộc mới thì để
                 del _DANG_GOI[ma]
         return ws
 

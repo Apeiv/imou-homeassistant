@@ -348,8 +348,8 @@ async def test_call_ws_cuoc_thu_hai_bao_ban(hass, hass_client, hass_read_only_ac
     await _cho_het_goi(muc)
 
 
-async def test_call_ws_cung_nguoi_goi_lai_thi_thay_cuoc_cu(hass, hass_client):
-    """Cùng người dùng (máy khác, hay thẻ chưa kịp đóng cuộc cũ): cuộc cũ đóng, cuộc mới vào — không tự báo bận."""
+async def test_call_ws_cung_nguoi_may_thu_hai_bao_ban(hass, hass_client):
+    """Cùng người dùng từ máy thứ hai: cũng bận, cuộc đầu giữ nguyên."""
     muc = _hik()
     await _nap(hass, muc)
     client = await hass_client()
@@ -357,10 +357,9 @@ async def test_call_ws_cung_nguoi_goi_lai_thi_thay_cuoc_cu(hass, hass_client):
     ws1 = await client.ws_connect(duong)
     assert await ws1.receive_json() == {"type": "ready"}
     ws2 = await client.ws_connect(duong)
-    assert await ws2.receive_json() == {"type": "ready"}
-    assert (await ws1.receive()).type == aiohttp.WSMsgType.CLOSE
-    assert len(muc.runtime_data.mic_camera.nguoi_nghe) == 1
-    await ws2.close()
+    assert (await ws2.receive()).type == aiohttp.WSMsgType.CLOSE and ws2.close_code == intercom.MA_BAN
+    assert not ws1.closed and len(muc.runtime_data.mic_camera.nguoi_nghe) == 1
+    await ws1.close()
     await _cho_het_goi(muc)
 
 
