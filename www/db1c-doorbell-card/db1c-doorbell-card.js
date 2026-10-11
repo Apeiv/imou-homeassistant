@@ -40,7 +40,7 @@ import { VideoRTC } from "./go2rtc/video-rtc.js";
 
 const VIMAR = "vimar-intercom-card";
 const TAG = "db1c-doorbell-card";
-const VIDEO = "db1c-video-rtc";  // the player below
+const VIDEO = TAG + "-video-rtc";  // the player below: its own per card tag, a beta copy on the same page never replaces it
 const STATUS = "sensor.__db1c_status";       // fake: they only exist in the hass the Vimar card sees
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
