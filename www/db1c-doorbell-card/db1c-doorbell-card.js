@@ -1149,10 +1149,10 @@ customElements.whenDefined(VIMAR).then(() => {
       super.connectedCallback();
     }
 
-    // Next task: moved in the page (masonry rebuilding its columns when the phone rotates) = back already, the
-    // call goes on.
+    // Back within 1 s = only moved in the page (masonry rebuilds its columns on rotation, awaiting each card's
+    // size: tens of ms detached): the live, the clip and the call go on.
     disconnectedCallback() {
-      clearTimeout(this._dcT);  // detached twice before the task: one cleanup
+      clearTimeout(this._dcT);  // detached twice in that time: one cleanup
       this._dcT = setTimeout(() => {
         if (this.isConnected) return;
         for (const e of PAGE_EVENTS) window.removeEventListener(e, this._onPageState);
@@ -1168,7 +1168,7 @@ customElements.whenDefined(VIMAR).then(() => {
         this._goQuiet();
         this._closePeer();  // now, not after the base player's 5 s: iOS keeps a detached <video> playing
         this._live = undefined;  // recreated on return
-      });
+      }, 1000);
     }
   }
 
