@@ -113,7 +113,7 @@ colors:
 ## How it works
 
 - **Video:** `go2rtc/video-rtc.js` from go2rtc, unmodified, in modes `webrtc,mse,mjpeg` on
-  `/api/frigate/<frigate_instance>/mse/api/ws?src=<stream>`. A 10-line subclass (`db1c-video-rtc`) signs the
+  `/api/frigate/<frigate_instance>/mse/api/ws?src=<stream>`. A subclass (`<card tag>-video-rtc`) signs the
   URL again (`auth/sign_path`, 30 s) on every connection and reconnection. The card never calls `play()` or sets
   `src`/`srcObject` on the player's video: it reads its events and sets `muted`.
 - **Call:** Answer opens the microphone (echo cancellation, noise suppression) and one signed WebSocket to

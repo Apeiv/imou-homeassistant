@@ -258,6 +258,13 @@ customElements.whenDefined(VIMAR).then(() => {
         this.mseBad = true;
         if (!this.pc) this._restart();
       }, true);
+      // WebKit plays a WebRTC stream given to a <video> below the fold without ever showing it (readyState 0, also
+      // once on screen): off screen the clock waits, back on screen such a stream is asked for again.
+      new IntersectionObserver(([e]) => {
+        this.seen = e.isIntersecting;
+        if (!this.seen) this.unseen = true;
+        else if (this.unseen && !this.framed && this.video.srcObject instanceof MediaStream) this._restart();
+      }).observe(this.video);
       if (!this.video.requestVideoFrameCallback) return this.video.addEventListener("timeupdate", () => this._frame());
       const tick = () => { this.video.requestVideoFrameCallback(tick); this._frame(); };  // re-requested first: never dies
       this.video.requestVideoFrameCallback(tick);
@@ -315,7 +322,8 @@ customElements.whenDefined(VIMAR).then(() => {
 
     // The base reads `sb.buffered` on every updateend, also the one a teardown (src = "") fires on the SourceBuffer
     // it has just removed: that throws, uncaught, inside the base's closure. The buffer the base adds answers null
-    // instead once removed. The MediaSource is caught on its way to the <video> (blob URL, or srcObject on Safari).
+    // instead once removed, and its trim (`remove`, WebKit's TypeError) is best effort. The MediaSource is caught on
+    // its way to the <video> (blob URL, or srcObject on Safari).
     _mse() {
       this.msed = true;
       const url = URL.createObjectURL;
@@ -327,6 +335,8 @@ customElements.whenDefined(VIMAR).then(() => {
       ms.addSourceBuffer = (type) => {
         const sb = add.call(ms, type);
         Object.defineProperty(sb, "buffered", { get: () => { try { return get.call(sb); } catch { return null; } } });
+        const remove = sb.remove;
+        sb.remove = (start, end) => { try { remove.call(sb, start, end); } catch { /* the next updateend trims */ } };
         return sb;
       };
     }
@@ -380,18 +390,20 @@ customElements.whenDefined(VIMAR).then(() => {
     // No picture for FRAME_TIMEOUT: closed and connected again now, without waiting for the old WebSocket's close
     // (a dead peer may never send it). No blind reconnects where no frames are painted: a hidden tab (desktop), or
     // a video the browser paused (iOS: out of the viewport, Low Power Mode refusing even a muted play): the clock
-    // starts again on return / on play.
+    // starts again on return / on play, or on screen (`seen`): an opening off screen leaves no mode out.
     _restart() {
       if (!this.isConnected) return;
       if (document.hidden) return document.addEventListener("visibilitychange", () => this._arm(), { once: true });
+      if (this.seen === false) return (this.wdTID = setTimeout(() => this._restart(), FRAME_TIMEOUT));
       if (this.video.paused && this.video.readyState >= 2) {
         return this.video.addEventListener("play", () => this._arm(), { once: true });
       }
-      if (!this.framed) {
+      if (!this.framed && !this.unseen) {
         const until = Date.now() + MODE_OUT_MS;
         if (this.pc?.connectionState === "connected") this.out.webrtc = until;  // a peer up without a picture; ICE stuck = MSE's timer
         if (this.mseBad) this.out.mse = until;
       }
+      this.unseen = false;
       clearTimeout(this.reconnectTID);
       this.reconnectTID = 0;
       this.ondisconnect();
