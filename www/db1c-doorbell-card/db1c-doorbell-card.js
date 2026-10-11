@@ -72,6 +72,7 @@ const DEFAULTS = {
 };
 // History sheet: close animation (ms), drag slop and close distance (px), flick window (ms) and speed (px/ms).
 const SHEET_MS = 220, DRAG_SLOP = 8, DRAG_CLOSE = 80, FLICK_MS = 80, FLICK_SPEED = 0.5;
+let heardClip = null;  // the one clip heard on the page: unmuting one mutes the others (they keep playing)
 const COLORS = ["accent", "warning", "on-warning", "glass", "ink", "button", "button-ink", "sheet", "sheet-ink"];  // colors: keys -> --db1c-<key>
 // User-visible strings, picked by `language:` or HA's language; missing language or key = English.
 // Frigate labels are l_<label>: unknown labels show capitalised.
@@ -104,6 +105,7 @@ const I18N = {
   },
 };
 // Static texts: data-t = textContent, data-ta = aria-label; filled by _applyLang (hass, hence the language, comes later).
+// iOS controls stay free: only #back, top centre.
 const CLIP = `<video id="clipv" playsinline controls preload="none" hidden></video>
   <button id="back" data-ta="back_aria" hidden><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon><span data-t="back"></span></button>`;
 const SHEET = `<dialog class="sheet" data-ta="events_aria"><div class="grab"><div class="handle"></div>
@@ -121,14 +123,14 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live .media { aspect-ratio: var(--db1c-ar, 1); }
   :host([layout="overlay"]) .live[data-fit="cover"] .media { aspect-ratio: auto; height: 260px; }
   .drawer { display: none !important; }  /* the history is the .sheet */
-  ha-card.clip :is(.row, .badge) { display: none !important; }
+  ha-card.clip :is(.row, .badge, #log, #fit) { display: none !important; }
   #clipv { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; object-fit: contain; background: #000; }
   /* Clip loading/buffering: a spinner over the poster. */
   ha-card.cload .media::after { content: ""; position: absolute; left: 50%; top: 50%; z-index: 3; width: 36px; height: 36px;
     margin: -18px 0 0 -18px; box-sizing: border-box; border-radius: 50%; border: 3px solid rgba(255,255,255,.3);
     border-top-color: #fff; animation: db1c-spin .9s linear infinite; pointer-events: none; }
   @keyframes db1c-spin { to { transform: rotate(360deg); } }
-  #back { position: absolute; top: 12px; left: 12px; z-index: 4; height: 44px; padding: 0 14px 0 10px; gap: 6px;
+  #back { position: absolute; top: 12px; left: 50%; translate: -50% 0; z-index: 4; height: 44px; padding: 0 14px 0 10px; gap: 6px;
     display: inline-flex; align-items: center; border-radius: 22px; font-size: 13px; color: #fff; background: rgba(0,0,0,.45);
     -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
   #back[hidden] { display: none; }
@@ -604,6 +606,9 @@ customElements.whenDefined(VIMAR).then(() => {
       const load = (on) => () => this._card.classList.toggle("cload", on && !this._clipV.hidden);  // spinner while it buffers
       this._clipV.onwaiting = load(true);
       this._clipV.onplaying = this._clipV.oncanplay = this._clipV.onerror = this._clipV.onpause = load(false);
+      this._clipV.onvolumechange = this._clipV.onplay = ({ target: v }) => {  // native volume, or an unmuted play
+        if (!v.muted && heardClip !== v) { if (heardClip) heardClip.muted = true; heardClip = v; }
+      };
       this._back = $("#back");
       this._back.onclick = () => this._stopClip();
       this._sheet = $("dialog.sheet");
