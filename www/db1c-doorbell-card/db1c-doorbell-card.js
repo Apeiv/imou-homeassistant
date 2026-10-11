@@ -1147,11 +1147,13 @@ customElements.whenDefined(VIMAR).then(() => {
       for (const e of PAGE_EVENTS) window.addEventListener(e, this._onPageState);
       this._hidden = pageGone();
       super.connectedCallback();
+      if (this._clipPlay && this._card.classList.contains("clip")) this._clipV.play().catch(() => {});  // the move paused it
     }
 
     // Back within 1 s = only moved in the page (masonry rebuilds its columns on rotation, awaiting each card's
     // size: tens of ms detached): the live, the clip and the call go on.
     disconnectedCallback() {
+      this._clipPlay = this._clipV?.paused === false;  // a detached <video> pauses: playing again if back
       clearTimeout(this._dcT);  // detached twice in that time: one cleanup
       this._dcT = setTimeout(() => {
         if (this.isConnected) return;
