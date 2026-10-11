@@ -2,7 +2,7 @@
 // "backend": no SIP and no vimar_intercom WebSocket, but
 //   visitor video + voice at rest: go2rtc's own player (go2rtc/video-rtc.js, unmodified, the go2rtc version
 //     inside Frigate) on the Frigate integration proxy (/api/frigate/<instance>/mse/api/ws?src=<stream>),
-//     modes webrtc,mse,mjpeg (WebRTC at home, MSE through the tunnel, MJPEG as a last resort), URL signed
+//     modes webrtc,mse,mjpeg (WebRTC first, MSE when no peer connects, MJPEG as a last resort), URL signed
 //     again on every (re)connection;
 //   call (hear + talk): ONE signed WebSocket to dahua_talk, /api/dahua_talk/call_ws/<speaker>: the server says
 //     {"type":"ready"} (busy = close 4409, 3-minute cap = close 4408), binary 0x01 + PCM16 8 kHz = visitor voice, the card sends
@@ -49,6 +49,10 @@ const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signa
 const RATE = 8000;  // call audio, both ways
 const FRAME_TIMEOUT = 8000;  // ms for a first picture after connecting (WebSocket + go2rtc's first keyframe, ~3.5 s on the DB1C) before starting over
 const MODE_OUT_MS = 60000;  // a mode that gave no picture is left out of the next connections for this long
+// stream -> { mode -> left out until (ms) }. The page's, not the player's: a card back from the background makes a new
+// player, and a peer that connects without a picture would cost FRAME_TIMEOUT again.
+const OUT = {};
+const MSE_AFTER_MS = 2000;  // WebRTC first: MSE is asked for only if the peer has not connected by then (an ICE stuck out of home never says "failed" in time)
 const BG_HOLD_MS = 5000;  // the live stays (muted) this long after the page goes hidden: back sooner, the picture is there
 const LAN = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/.test(location.hostname);
 const REQUIRED = ["camera", "stream", "frigate_camera"];  // + speaker with ring (the doorbell)
@@ -111,6 +115,7 @@ const EXTRA_CSS = `
   /* Startup: the camera's latest picture instead of "waiting for video" until the first frame. */
   ha-card.live.wait .still[src] { display: block; }
   ha-card.live.wait .still[src] + .ph { display: none; }
+  ha-card.live.bridge .still[src] { display: block; }  /* MSE -> WebRTC: MSE's last picture over the blank <video> */
   /* Fit (default) = whole picture, the card takes the stream's shape; Fill = a 260 px strip.
      Status pill top left, History then Fit/Fill in the corner, 44 px dark rounds bottom left, Open bottom right. */
   :host([layout="overlay"]) .live .media { aspect-ratio: var(--db1c-ar, 1); }
@@ -229,10 +234,10 @@ customElements.whenDefined(VIMAR).then(() => {
   // never "resize"/"loadedmetadata": the MSE init segment alone fires them. `onframe` = first picture of a
   // connection; `onreset` = connecting without one (the card: still, "connecting…").
   // One clock: no picture for FRAME_TIMEOUT (re-armed by every frame) = close everything and connect again at once
-  // (_restart): a stall, a mute WebSocket, a stuck peer. go2rtc runs MSE and WebRTC together on the one WebSocket:
-  // the first to paint keeps the <video> (WebRTC replaces only an MSE that has painted nothing: no still or black
-  // in between). An opening with no picture leaves out, for MODE_OUT_MS, WebRTC if it was tried and MSE if it
-  // failed to decode: the next ones fall back down to MJPEG, and a transient failure is not forever.
+  // (_restart): a stall, a mute WebSocket, a stuck peer. WebRTC is the road: the offer goes first, MSE is asked for
+  // after MSE_AFTER_MS without a connected peer (or at once with no WebRTC), and WebRTC takes the <video> whenever
+  // its first picture comes. An opening with no picture leaves out, for MODE_OUT_MS, WebRTC if its peer was up and MSE
+  // if it failed to decode: the next ones fall back down to MJPEG, and a transient failure is not forever.
   // Errors of the <video>: only an MSE decode error counts (the base would close the WebSocket, also while WebRTC
   // negotiates on it): with no peer it restarts now, else WebRTC or the clock decide.
   // The base player's own reconnects come through onconnect. video-rtc.js v1.6.0, unmodified.
@@ -240,7 +245,6 @@ customElements.whenDefined(VIMAR).then(() => {
     oninit() {
       this.visibilityCheck = false;
       this.RECONNECT_TIMEOUT = 3000;  // the base's 15 s: back from the background HA's WebSocket is often gone
-      this.out = {};  // mode -> left out until (ms)
       super.oninit();
       this.video.controls = false;
       this.video.muted = true;
@@ -248,7 +252,7 @@ customElements.whenDefined(VIMAR).then(() => {
         e.stopPropagation();
         const err = this.video.error;  // 4 = the "empty src" of a (re)connection: not news
         if (err && err.code !== 4) console.warn("db1c-doorbell-card: video error", err.code, err.message);
-        if (err?.code !== 3 || this.video.srcObject) return;  // srcObject: WebRTC's picture, not MSE's
+        if (err?.code !== 3 || this.video.srcObject instanceof MediaStream) return;  // WebRTC's picture (MSE's srcObject on Safari is a ManagedMediaSource)
         this.mseBad = true;
         if (!this.pc) this._restart();
       }, true);
@@ -264,6 +268,8 @@ customElements.whenDefined(VIMAR).then(() => {
         this.pc = null;
         this.pcState = WebSocket.CLOSED;
       }
+      // A peer that failed before its first picture (at once on go2rtc's first candidates, or after connecting): MSE now.
+      if (!this.pc && this.mode?.includes("mse")) this._mseNow();
       if (!this.isConnected || !this.sign || this.ws || this.pc || this.signing) return false;
       let tid;
       const late = new Promise((_, no) => { tid = setTimeout(() => no(new Error("no answer in 5 s")), 5000); });
@@ -275,7 +281,7 @@ customElements.whenDefined(VIMAR).then(() => {
           this.video.src = "";
           const now = Date.now();
           this.mode = ["webrtc", "mse", "mjpeg"].filter((m) => !(this.out[m] > now)).join(",");
-          this.mseBad = false;
+          this.mseBad = this.msed = false;
           this.onreset?.();
           this._arm();
           super.onconnect();
@@ -292,10 +298,24 @@ customElements.whenDefined(VIMAR).then(() => {
       return super.onclose();
     }
 
+    // onopen calls this before onwebrtc: the peer is looked at when the timer fires. No WebSocket = WebRTC took over.
+    onmse() {
+      clearTimeout(this.mseTID);
+      if (!this.mode.includes("webrtc") || !("RTCPeerConnection" in window)) return this._mse();
+      this.mseTID = setTimeout(() => this.pc?.connectionState !== "connected" && this._mseNow(), MSE_AFTER_MS);
+    }
+
+    _mseNow() {  // once per connection, on its open WebSocket
+      clearTimeout(this.mseTID);
+      this.mseTID = 0;
+      if (!this.msed && this.ws?.readyState === WebSocket.OPEN) this._mse();
+    }
+
     // The base reads `sb.buffered` on every updateend, also the one a teardown (src = "") fires on the SourceBuffer
     // it has just removed: that throws, uncaught, inside the base's closure. The buffer the base adds answers null
     // instead once removed. The MediaSource is caught on its way to the <video> (blob URL, or srcObject on Safari).
-    onmse() {
+    _mse() {
+      this.msed = true;
       const url = URL.createObjectURL;
       let ms;
       URL.createObjectURL = (o) => (ms = o, url.call(URL, o));
@@ -311,13 +331,6 @@ customElements.whenDefined(VIMAR).then(() => {
 
     onpcvideo(video2) {
       const pc = this.pc;
-      if (pc && this.framed) {  // MSE already paints: it keeps the <video> (the call's voice has its own WebSocket)
-        pc.close();
-        this.pc = null;
-        this.pcState = WebSocket.CLOSED;
-        video2.srcObject = null;
-        return;
-      }
       // The DB1C's audio reaches WebRTC first: "loadeddata" fires while its video still waits for a keyframe (the
       // camera's GOP, ~3 s). The swap waits for WebRTC's first picture (a size: playing, muted, or a detached paused
       // element may never decode one); its peer gone meanwhile, it never comes.
@@ -329,6 +342,14 @@ customElements.whenDefined(VIMAR).then(() => {
         video2.muted = true;
         return video2.play().catch(() => {});
       }
+      // WebKit blanks the <video> for ~0.7 s when its source moves from MSE to WebRTC (a poster does not show over a
+      // MediaStream): MSE's last picture goes to the card (`onbridge`) until WebRTC's first one (`onframe`).
+      const v = this.video;
+      if (this.onbridge && v.readyState >= 2 && !(v.srcObject instanceof MediaStream)) try {
+        const c = Object.assign(document.createElement("canvas"), { width: v.videoWidth, height: v.videoHeight });
+        c.getContext("2d").drawImage(v, 0, 0);
+        this.onbridge(c.toDataURL("image/jpeg", 0.8));
+      } catch { /* no bridge, no harm */ }
       super.onpcvideo(video2);
       // WebRTC took the <video>: its own clock. After this frame's callbacks: a requestVideoFrameCallback pending
       // for the MSE element's last state would count as WebRTC's.
@@ -337,6 +358,7 @@ customElements.whenDefined(VIMAR).then(() => {
 
     ondisconnect() {
       clearTimeout(this.wdTID);
+      clearTimeout(this.mseTID); this.mseTID = 0;
       if (this.video) super.ondisconnect();  // never connected: nothing to close
     }
 
@@ -365,7 +387,7 @@ customElements.whenDefined(VIMAR).then(() => {
       }
       if (!this.framed) {
         const until = Date.now() + MODE_OUT_MS;
-        if (this.mode.includes("webrtc")) this.out.webrtc = until;
+        if (this.pc?.connectionState === "connected") this.out.webrtc = until;  // a peer up without a picture; ICE stuck = MSE's timer
         if (this.mseBad) this.out.mse = until;
       }
       clearTimeout(this.reconnectTID);
@@ -727,13 +749,15 @@ customElements.whenDefined(VIMAR).then(() => {
       this._video = null;
       this._card.classList.add("wait");
       const el = (this._rtc = document.createElement(VIDEO));
+      el.out = OUT[this._cfg.stream] ??= {};
       el.media = "video,audio";
       el.sign = () => this._hass.callWS({ type: "auth/sign_path", expires: 30,
         path: `/api/frigate/${this._cfg.frigate_instance}/mse/api/ws?src=${encodeURIComponent(this._cfg.stream)}` })
         .then(({ path }) => location.origin.replace(/^http/, "ws") + path);
       // First real picture (the player's `onframe`): the still goes, "live" (_connected = a picture has been seen).
       // _v from then on. Connecting (again) without one: the still and "connecting…" again.
-      el.onframe = () => { if (this._rtc === el) { this._v = el.video; this._onVideo(); } };
+      el.onframe = () => { if (this._rtc === el) { this._v = el.video; this._card.classList.remove("bridge"); this._onVideo(); } };
+      el.onbridge = (url) => { if (this._rtc === el) { this._still.src = url; this._card.classList.add("bridge"); } };
       el.onreset = () => {
         if (this._rtc !== el) return;
         this._connected = false;
