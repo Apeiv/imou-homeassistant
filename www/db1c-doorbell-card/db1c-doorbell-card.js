@@ -780,8 +780,23 @@ customElements.whenDefined(VIMAR).then(() => {
       if (save) try { localStorage.setItem(AR_KEY, JSON.stringify({ ...this._ar(), [this._cfg.stream]: ar })); } catch { /* this session only */ }
     }
 
+    // iOS: the <video>'s layer may keep a size from before (resized while hidden or before its first frame) and
+    // paint the picture at that size in the top left corner (seen at 1:2). A 1 px size change for 1-2 frames makes
+    // WebKit send the box's size again. At each connection's first picture, on every return to the page, and on
+    // resize (rotation, Fit/Fill, masonry, popup) through the Vimar card's own ResizeObserver on #video.
+    _relayout() {
+      const v = this._v;
+      if (!v || this._nudge === v) return;  // one at a time per <video>: its restore lands on the latest size anyway
+      this._nudge = v;
+      v.style.width = "calc(100% - 1px)";
+      requestAnimationFrame(() => requestAnimationFrame(() => { v.style.width = "100%"; if (this._nudge === v) this._nudge = null; }));
+    }
+
+    _fitShape() { super._fitShape(); this._relayout(); }
+
     _onVideo() {
       this._shape(this._v?.videoWidth, this._v?.videoHeight);
+      this._relayout();  // after the shape: at the box's final size
       this._connected = true;
       this._card.classList.remove("wait");
       this._render();
@@ -1088,7 +1103,7 @@ customElements.whenDefined(VIMAR).then(() => {
       const hidden = pageGone(e);
       if (hidden === this._hidden) return;
       this._hidden = hidden;
-      if (hidden) this._goQuiet();
+      if (hidden) this._goQuiet(); else this._relayout();
       if (this._root && this._hass) this._render();  // hidden: _setVideo closes the live; visible: reconnects it
     };
 
