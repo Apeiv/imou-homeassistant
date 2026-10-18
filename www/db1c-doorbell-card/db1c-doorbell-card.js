@@ -44,6 +44,7 @@ const VIDEO = TAG + "-video-rtc";  // per card tag: a beta copy gets its own pla
 const STATUS = "sensor.__db1c_status";       // fake: they only exist in the hass the Vimar card sees
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
+const ZOOM_MAX = 4, ZOOM_TAP = 2.5;  // pinch up to 4x; a double tap jumps to 2.5x
 const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
 const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
 const RATE = 8000;  // call audio, both ways
@@ -123,6 +124,9 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live .media { aspect-ratio: var(--db1c-ar, 1); }
   :host([layout="overlay"]) .live[data-fit="cover"] .media { aspect-ratio: auto; height: 260px; }
   .drawer { display: none !important; }  /* the history is the .sheet */
+  /* Zoom: the same transform on the live picture and the still; at 1x a finger scrolls the page. */
+  .media { overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+  .media :is(#video, .still) { transform: var(--zt, none); transform-origin: 0 0; }
   ha-card.clip :is(.row, .badge, #log, #fit) { display: none !important; }
   #clipv { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; object-fit: contain; background: #000; }
   /* Clip loading/buffering: a spinner over the poster. */
@@ -612,11 +616,14 @@ customElements.whenDefined(VIMAR).then(() => {
       this._shape(this._ar()[this._cfg.stream] || 0, 1, false);  // last live shape, before any frame (no jump, no white band)
       this._still.addEventListener("load", () => !this._ar()[this._cfg.stream] && this._shape(this._still.naturalWidth, this._still.naturalHeight, false));
       this._fit.onclick = () => {
+        this._zoomTo(1);
         this._cover = !this._cover;
         try { localStorage.setItem(FIT_KEY, this._cover ? "cover" : "contain"); } catch { /* this session only */ }
         this._applyFit();
       };
-      this._root.querySelector(".media").insertAdjacentHTML("beforeend", CLIP);
+      this._zm = this._root.querySelector(".media");
+      this._zm.insertAdjacentHTML("beforeend", CLIP);
+      this._zoomInit();
       this._root.append(document.createRange().createContextualFragment(SHEET));  // ShadowRoot has no insertAdjacentHTML
       const $ = (s) => this._root.querySelector(s);
       this._clipV = $("#clipv");
@@ -838,9 +845,74 @@ customElements.whenDefined(VIMAR).then(() => {
       requestAnimationFrame(() => requestAnimationFrame(() => { v.style.width = "100%"; if (this._nudge === v) this._nudge = null; }));
     }
 
-    _fitShape() { super._fitShape(); this._relayout(); }
+    _fitShape() { super._fitShape(); this._relayout(); if (this._zoom) this._zoomPan(0, 0); }  // the base may call it before _zoomInit
+
+    // Zoom: pinch 1-4x around the fingers, double tap 1x <-> 2.5x on the point, one finger drags only when
+    // zoomed (touch-action none then; pan-y at 1x so the page scrolls). Buttons and clips are left alone.
+    _zoomInit() {
+      const m = this._zm, pts = new Map();
+      let pinch = null, tap = null, down = null;
+      this._zoom = { s: 1, x: 0, y: 0 };
+      const at = (e) => { const r = m.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+      const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+      m.addEventListener("pointerdown", (e) => {
+        if (e.target.closest("button, #clipv") || this._card.classList.contains("clip")) return;
+        m.setPointerCapture(e.pointerId);  // its up/cancel reach us even if the <video> is replaced or the finger leaves
+        pts.set(e.pointerId, at(e));
+        down = pts.size === 1 ? { q: at(e), t: e.timeStamp } : null;  // a tap is one short, still finger
+        if (pts.size === 2) { const [a, b] = pts.values(); pinch = { d: dist(a, b) || 1, s: this._zoom.s }; }
+      });
+      m.addEventListener("pointermove", (e) => {
+        const p = pts.get(e.pointerId);
+        if (!p) return;
+        const q = at(e);
+        pts.set(e.pointerId, q);
+        if (pinch && pts.size === 2) {
+          const [a, b] = pts.values();
+          this._zoomTo(pinch.s * dist(a, b) / pinch.d, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+        } else if (pts.size === 1 && this._zoom.s > 1) this._zoomPan(q[0] - p[0], q[1] - p[1]);
+      });
+      const up = (e) => {
+        if (!pts.delete(e.pointerId)) return;
+        if (pts.size < 2) pinch = null;
+        if (e.type !== "pointerup" || pts.size || !down) return;
+        const q = at(e), isTap = e.timeStamp - down.t < 250 && dist(q, down.q) < 10;
+        down = null;
+        if (!isTap) { tap = null; return; }
+        if (tap && e.timeStamp - tap.t < 300 && dist(q, tap.q) < 30) {
+          tap = null;
+          this._zoomTo(this._zoom.s > 1 ? 1 : ZOOM_TAP, q);
+        } else tap = { q, t: e.timeStamp };
+      };
+      // iOS: a two-finger pinch that also moves vertically must not turn into a page scroll (touch-action pan-y).
+      m.addEventListener("touchmove", (e) => { if (e.touches.length > 1 && !this._card.classList.contains("clip")) e.preventDefault(); },
+        { passive: false });
+      m.addEventListener("pointerup", up);
+      m.addEventListener("pointercancel", up);
+    }
+
+    // c stays under the same picture point (transform-origin 0 0: screen = translate + scale * point).
+    _zoomTo(s, c = [0, 0]) {
+      const z = this._zoom;
+      s = Math.min(ZOOM_MAX, Math.max(1, s));
+      z.x = c[0] - (c[0] - z.x) * s / z.s;
+      z.y = c[1] - (c[1] - z.y) * s / z.s;
+      z.s = s;
+      this._zoomPan(0, 0);
+    }
+
+    _zoomPan(dx, dy) {  // the picture's edges never come inside the box
+      const z = this._zoom, w = this._zm.clientWidth, h = this._zm.clientHeight;
+      z.x = z.s > 1 ? Math.min(0, Math.max(w - w * z.s, z.x + dx)) : 0;
+      z.y = z.s > 1 ? Math.min(0, Math.max(h - h * z.s, z.y + dy)) : 0;
+      // At 1x no transform at all: WebKit is touchy about painting a transformed <video>.
+      if (z.s > 1) this._zm.style.setProperty("--zt", `translate(${z.x}px, ${z.y}px) scale(${z.s})`);
+      else this._zm.style.removeProperty("--zt");
+      this._zm.style.touchAction = z.s > 1 ? "none" : "";
+    }
 
     _onVideo() {
+      if (this._zoom) this._zoomTo(1);  // a new connection starts unzoomed
       this._shape(this._v?.videoWidth, this._v?.videoHeight);
       this._relayout();  // after the shape: at the box's final size
       this._connected = true;
