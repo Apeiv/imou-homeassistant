@@ -45,6 +45,7 @@ const STATUS = "sensor.__db1c_status";       // fake: they only exist in the has
 const LAST = "sensor.__db1c_last_ring";
 const FIT_KEY = "db1c_doorbell_card_fit2";  // new key: the default moved from Fill to Fit
 const ZOOM_MAX = 4, ZOOM_TAP = 2.5;  // pinch up to 4x; a double tap jumps to 2.5x
+const CLIP_CTL_PX = 56;  // height of the native clip controls band
 const AR_KEY = "db1c_doorbell_card_ar";     // { stream: width/height } of the last live video: the card's shape from the first paint
 const CLIP_SIGN_S = 3600;  // iOS clips: HLS segments carry the playlist's signature, so it must outlive the playback
 const RATE = 8000;  // call audio, both ways
@@ -124,9 +125,9 @@ const EXTRA_CSS = `
   :host([layout="overlay"]) .live .media { aspect-ratio: var(--db1c-ar, 1); }
   :host([layout="overlay"]) .live[data-fit="cover"] .media { aspect-ratio: auto; height: 260px; }
   .drawer { display: none !important; }  /* the history is the .sheet */
-  /* Zoom: the same transform on the live picture and the still; at 1x a finger scrolls the page. */
+  /* Zoom: the same transform on the live picture, the still and the history clip; at 1x a finger scrolls the page. */
   .media { overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
-  .media :is(#video, .still) { transform: var(--zt, none); transform-origin: 0 0; }
+  .media :is(#video, .still, #clipv) { transform: var(--zt, none); transform-origin: 0 0; }
   ha-card.clip :is(.row, .badge, #log, #fit) { display: none !important; }
   #clipv { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; object-fit: contain; background: #000; }
   /* Clip loading/buffering: a spinner over the poster. */
@@ -623,10 +624,10 @@ customElements.whenDefined(VIMAR).then(() => {
       };
       this._zm = this._root.querySelector(".media");
       this._zm.insertAdjacentHTML("beforeend", CLIP);
-      this._zoomInit();
       this._root.append(document.createRange().createContextualFragment(SHEET));  // ShadowRoot has no insertAdjacentHTML
       const $ = (s) => this._root.querySelector(s);
       this._clipV = $("#clipv");
+      this._zoomInit();
       const load = (on) => () => this._card.classList.toggle("cload", on && !this._clipV.hidden);  // spinner while it buffers
       this._clipV.onwaiting = load(true);
       this._clipV.onplaying = this._clipV.oncanplay = this._clipV.onerror = this._clipV.onpause = load(false);
@@ -848,7 +849,7 @@ customElements.whenDefined(VIMAR).then(() => {
     _fitShape() { super._fitShape(); this._relayout(); if (this._zoom) this._zoomPan(0, 0); }  // the base may call it before _zoomInit
 
     // Zoom: pinch 1-4x around the fingers, double tap 1x <-> 2.5x on the point, one finger drags only when
-    // zoomed (touch-action none then; pan-y at 1x so the page scrolls). Buttons and clips are left alone.
+    // zoomed (touch-action none then; pan-y at 1x so the page scrolls). Live and history clip alike; buttons are left alone.
     _zoomInit() {
       const m = this._zm, pts = new Map();
       let pinch = null, tap = null, down = null;
@@ -856,10 +857,12 @@ customElements.whenDefined(VIMAR).then(() => {
       const at = (e) => { const r = m.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
       const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
       m.addEventListener("pointerdown", (e) => {
-        if (e.target.closest("button, #clipv") || this._card.classList.contains("clip")) return;
-        m.setPointerCapture(e.pointerId);  // its up/cancel reach us even if the <video> is replaced or the finger leaves
+        if (e.target.closest("button")) return;
+        // The clip's native controls (bottom band, at 1x) keep their own taps and drags: no capture, no double tap.
+        const ctl = e.target === this._clipV && this._zoom.s === 1 && at(e)[1] > m.clientHeight - CLIP_CTL_PX;
+        if (!ctl) m.setPointerCapture(e.pointerId);  // its up/cancel reach us even if the <video> is replaced or the finger leaves
         pts.set(e.pointerId, at(e));
-        down = pts.size === 1 ? { q: at(e), t: e.timeStamp } : null;  // a tap is one short, still finger
+        down = pts.size === 1 && !ctl ? { q: at(e), t: e.timeStamp } : null;  // a tap is one short, still finger
         if (pts.size === 2) { const [a, b] = pts.values(); pinch = { d: dist(a, b) || 1, s: this._zoom.s }; }
       });
       m.addEventListener("pointermove", (e) => {
@@ -885,8 +888,7 @@ customElements.whenDefined(VIMAR).then(() => {
         } else tap = { q, t: e.timeStamp };
       };
       // iOS: a two-finger pinch that also moves vertically must not turn into a page scroll (touch-action pan-y).
-      m.addEventListener("touchmove", (e) => { if (e.touches.length > 1 && !this._card.classList.contains("clip")) e.preventDefault(); },
-        { passive: false });
+      m.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
       m.addEventListener("pointerup", up);
       m.addEventListener("pointercancel", up);
     }
@@ -908,11 +910,11 @@ customElements.whenDefined(VIMAR).then(() => {
       // At 1x no transform at all: WebKit is touchy about painting a transformed <video>.
       if (z.s > 1) this._zm.style.setProperty("--zt", `translate(${z.x}px, ${z.y}px) scale(${z.s})`);
       else this._zm.style.removeProperty("--zt");
+      this._clipV.controls = z.s === 1;  // zoomed, the clip's own controls would be scaled too: back at 1x they return
       this._zm.style.touchAction = z.s > 1 ? "none" : "";
     }
 
     _onVideo() {
-      if (this._zoom) this._zoomTo(1);  // a new connection starts unzoomed
       this._shape(this._v?.videoWidth, this._v?.videoHeight);
       this._relayout();  // after the shape: at the box's final size
       this._connected = true;
@@ -1167,6 +1169,7 @@ customElements.whenDefined(VIMAR).then(() => {
       v.load();  // the previous clip stops now, not when the new one arrives
       v.muted = false;
       v.hidden = this._back.hidden = false;
+      this._zoomTo(1);  // each clip, and the live after it, starts unzoomed
       this._applyAudio();
       this._card.classList.add("clip");
       this._card.classList.toggle("cload", !!e.has_clip);
@@ -1207,6 +1210,7 @@ customElements.whenDefined(VIMAR).then(() => {
       v.removeAttribute("poster");
       v.load();
       v.hidden = this._back.hidden = true;
+      this._zoomTo(1);
       this._applyAudio();
       this._card.classList.remove("clip");
     }
