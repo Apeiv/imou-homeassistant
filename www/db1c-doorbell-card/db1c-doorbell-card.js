@@ -337,10 +337,13 @@ customElements.whenDefined(VIMAR).then(() => {
       URL.createObjectURL = (o) => (ms = o, url.call(URL, o));
       try { super.onmse(); } finally { URL.createObjectURL = url; }
       ms = this.video.srcObject || ms;
-      const add = ms.addSourceBuffer, get = Object.getOwnPropertyDescriptor(SourceBuffer.prototype, "buffered").get;
+      const add = ms.addSourceBuffer;
       ms.addSourceBuffer = (type) => {
         const sb = add.call(ms, type);
-        Object.defineProperty(sb, "buffered", { get: () => { try { return get.call(sb); } catch { return null; } } });
+        // From the buffer's own prototype chain: iOS 18 has ManagedSourceBuffer but no global SourceBuffer.
+        let p = sb, d;
+        while (p && !(d = Object.getOwnPropertyDescriptor(p, "buffered"))) p = Object.getPrototypeOf(p);
+        if (d?.get) Object.defineProperty(sb, "buffered", { get: () => { try { return d.get.call(sb); } catch { return null; } } });
         const remove = sb.remove;
         sb.remove = (start, end) => { try { remove.call(sb, start, end); } catch { /* tried again on the next updateend */ } };
         return sb;
